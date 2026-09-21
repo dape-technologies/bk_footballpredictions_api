@@ -1,10 +1,11 @@
 from datetime import timedelta
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from .models import Package, Prediction, Subscription
+from .models import Package, Payment, Prediction, RecentWin, Subscription
 
 
 class PremiumAccessTests(APITestCase):
@@ -15,9 +16,14 @@ class PremiumAccessTests(APITestCase):
         self.package = Package.objects.create(
             name="Daily Edge",
             slug="daily-edge",
+            package_type="Accumulator",
             description="Daily member board",
             price=10000,
             duration_days=1,
+            win_probability=78,
+            commences_at=timezone.now() + timedelta(hours=3),
+            betslip_link="https://example.com/slips/daily-edge",
+            code="BK-DAY-78",
         )
         self.prediction = Prediction.objects.create(
             home_team="Arsenal",
@@ -44,6 +50,26 @@ class PremiumAccessTests(APITestCase):
         for field in ["market", "selection", "odds", "confidence", "analysis", "betslip_reference"]:
             self.assertNotIn(field, item)
 
+    def test_public_package_exposes_purchase_details_but_not_slip_secrets(self):
+        response = self.client.get("/api/v1/packages/")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.data[0]
+        self.assertEqual(item["package_type"], "Accumulator")
+        self.assertEqual(item["win_probability"], 78)
+        self.assertIn("commences_at", item)
+        self.assertNotIn("betslip_link", item)
+        self.assertNotIn("code", item)
+
+    def test_inactive_package_is_hidden_from_customers(self):
+        self.package.is_active = False
+        self.package.save(update_fields=["is_active", "updated_at"])
+
+        response = self.client.get("/api/v1/packages/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, [])
+
     def test_pending_request_does_not_unlock_content(self):
         Subscription.objects.create(user=self.customer, package=self.package, price_snapshot=self.package.price)
         self.client.force_login(self.customer)
@@ -52,6 +78,10 @@ class PremiumAccessTests(APITestCase):
 
         self.assertTrue(response.data[0]["locked"])
         self.assertNotIn("selection", response.data[0])
+
+        subscriptions = self.client.get("/api/v1/me/subscriptions/")
+        self.assertEqual(subscriptions.data[0]["betslip_link"], "")
+        self.assertEqual(subscriptions.data[0]["code"], "")
 
     def test_active_subscription_unlocks_content(self):
         Subscription.objects.create(
@@ -68,6 +98,10 @@ class PremiumAccessTests(APITestCase):
 
         self.assertFalse(response.data[0]["locked"])
         self.assertEqual(response.data[0]["selection"], "Arsenal to win")
+
+        subscriptions = self.client.get("/api/v1/me/subscriptions/")
+        self.assertEqual(subscriptions.data[0]["betslip_link"], self.package.betslip_link)
+        self.assertEqual(subscriptions.data[0]["code"], self.package.code)
 
     def test_expired_subscription_is_revoked(self):
         Subscription.objects.create(
@@ -92,6 +126,83 @@ class PremiumAccessTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, [])
+
+    def test_buying_a_slip_creates_a_pending_payment(self):
+        self.client.force_login(self.customer)
+
+        response = self.client.post(
+            "/api/v1/me/subscriptions/",
+            {"package_id": self.package.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payment = Payment.objects.get(subscription_id=response.data["id"])
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+        self.assertEqual(payment.amount, self.package.price)
+        self.assertEqual(response.data["payment_status"], Payment.Status.PENDING)
+        self.assertEqual(response.data["payment_reference"], payment.reference)
+
+    def test_confirmed_payment_activates_betslip_access(self):
+        subscription = Subscription.objects.create(
+            user=self.customer,
+            package=self.package,
+            price_snapshot=self.package.price,
+        )
+        payment = Payment.objects.create(
+            subscription=subscription,
+            user=self.customer,
+            package=self.package,
+            amount=self.package.price,
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            f"/api/v1/owner/payments/{payment.id}/resolve/",
+            {"decision": "confirm"},
+            format="json",
+        )
+
+        payment.refresh_from_db()
+        subscription.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payment.status, Payment.Status.PAID)
+        self.assertIsNotNone(payment.paid_at)
+        self.assertEqual(subscription.status, Subscription.Status.ACTIVE)
+        self.assertTrue(subscription.grants_access)
+
+    def test_customer_cannot_view_payment_dashboard(self):
+        self.client.force_login(self.customer)
+
+        response = self.client.get("/api/v1/owner/payments/")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_owner_can_upload_a_recent_win_photo_and_caption(self):
+        image = SimpleUploadedFile(
+            "recent-win.gif",
+            b"GIF87a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;",
+            content_type="image/gif",
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.post(
+            "/api/v1/owner/recent-wins/",
+            {"caption": "Weekend accumulator landed.", "image": image, "is_published": True},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["caption"], "Weekend accumulator landed.")
+        win = RecentWin.objects.get(pk=response.data["id"])
+        self.assertTrue(bool(win.image))
+
+        self.client.logout()
+        public_response = self.client.get("/api/v1/recent-wins/")
+        self.assertEqual(public_response.status_code, 200)
+        self.assertEqual(public_response.data[0]["caption"], "Weekend accumulator landed.")
+        self.assertTrue(public_response.data[0]["image_url"])
+        win.image.delete(save=False)
 
     def test_owner_can_approve_request_and_duration_is_applied(self):
         subscription = Subscription.objects.create(user=self.customer, package=self.package, price_snapshot=self.package.price)

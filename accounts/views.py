@@ -69,6 +69,47 @@ def login_view(request):
 
 
 @api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
+@csrf_protect
+def admin_login_view(request):
+    serializer = LoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        phone = User.normalize_phone(request.data.get("phone"))
+        record_activity(
+            request,
+            category=ActivityLog.Category.AUTHENTICATION,
+            action="auth.admin_login_failed",
+            description="An administrator sign-in attempt failed.",
+            actor=User.objects.filter(phone=phone).first(),
+        )
+        raise serializers.ValidationError(serializer.errors)
+
+    user = serializer.validated_data["user"]
+    if not user.is_product_owner:
+        record_activity(
+            request,
+            category=ActivityLog.Category.AUTHENTICATION,
+            action="auth.admin_login_denied",
+            description="A non-administrator account attempted to access the admin dashboard.",
+            actor=user,
+            target=user,
+        )
+        raise serializers.ValidationError("Administrator access is required.")
+
+    login(request, user)
+    record_activity(
+        request,
+        category=ActivityLog.Category.AUTHENTICATION,
+        action="auth.admin_login_succeeded",
+        description=f"{user.full_name} signed in to the admin dashboard.",
+        actor=user,
+        target=user,
+    )
+    return Response(UserSerializer(user).data)
+
+
+@api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def logout_view(request):
     user = request.user

@@ -2,7 +2,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
-from .models import Package, Prediction, RecentWin, Subscription, Testimonial
+from .models import Package, Payment, Prediction, RecentWin, Subscription, Testimonial
 
 
 def media_url(request, field):
@@ -12,6 +12,21 @@ def media_url(request, field):
     return request.build_absolute_uri(url) if request else url
 
 
+class PublicPackageSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    is_open = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Package
+        fields = [
+            "id", "name", "slug", "package_type", "price", "currency",
+            "win_probability", "commences_at", "image_url", "is_open",
+        ]
+
+    def get_image_url(self, obj):
+        return media_url(self.context.get("request"), obj.image)
+
+
 class PackageSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     is_open = serializers.ReadOnlyField()
@@ -19,31 +34,65 @@ class PackageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Package
         fields = [
-            "id", "name", "slug", "description", "price", "currency",
+            "id", "name", "slug", "package_type", "description", "price", "currency",
+            "win_probability", "commences_at", "betslip_link", "code",
             "duration_days", "access_label", "benefits", "image", "image_url",
             "is_active", "is_featured", "display_order", "request_deadline",
             "is_open", "created_at", "updated_at",
         ]
-        extra_kwargs = {"image": {"write_only": True, "required": False}}
+        extra_kwargs = {
+            "image": {"write_only": True, "required": False},
+            "package_type": {"required": True},
+            "betslip_link": {"required": True, "allow_blank": False},
+            "code": {"required": True, "allow_blank": False},
+            "commences_at": {"required": True, "allow_null": False},
+        }
 
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
 
 
 class SubscriptionSerializer(serializers.ModelSerializer):
-    package = PackageSerializer(read_only=True)
+    package = PublicPackageSerializer(read_only=True)
     user = UserSerializer(read_only=True)
     approved_by_name = serializers.CharField(source="approved_by.full_name", read_only=True)
     grants_access = serializers.ReadOnlyField()
+    betslip_link = serializers.SerializerMethodField()
+    code = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    payment_reference = serializers.SerializerMethodField()
 
     class Meta:
         model = Subscription
         fields = [
             "id", "user", "package", "status", "price_snapshot", "activation_source",
             "requested_at", "approved_at", "starts_at", "expires_at", "approved_by_name",
-            "owner_note", "customer_message", "grants_access", "updated_at",
+            "owner_note", "customer_message", "grants_access", "betslip_link", "code",
+            "payment_status", "payment_reference", "updated_at",
         ]
         read_only_fields = fields
+
+    def _can_view_slip(self, obj):
+        request = self.context.get("request")
+        return obj.grants_access or bool(
+            request
+            and request.user.is_authenticated
+            and request.user.is_product_owner
+        )
+
+    def get_betslip_link(self, obj):
+        return obj.package.betslip_link if self._can_view_slip(obj) else ""
+
+    def get_code(self, obj):
+        return obj.package.code if self._can_view_slip(obj) else ""
+
+    def get_payment_status(self, obj):
+        payment = getattr(obj, "payment", None)
+        return payment.status if payment else ""
+
+    def get_payment_reference(self, obj):
+        payment = getattr(obj, "payment", None)
+        return payment.reference if payment else ""
 
 
 class SubscriptionRequestSerializer(serializers.Serializer):
@@ -67,11 +116,32 @@ class SubscriptionRequestSerializer(serializers.Serializer):
         ).first()
         if existing:
             raise serializers.ValidationError({"package_id": "You already have a pending or active request for this package."})
-        return Subscription.objects.create(
+        subscription = Subscription.objects.create(
             user=user,
             package=package,
             price_snapshot=package.price,
         )
+        Payment.objects.create(
+            subscription=subscription,
+            user=user,
+            package=package,
+            amount=package.price,
+            currency=package.currency,
+        )
+        return subscription
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+    package = PublicPackageSerializer(read_only=True)
+
+    class Meta:
+        model = Payment
+        fields = [
+            "id", "reference", "user", "package", "amount", "currency",
+            "status", "provider", "paid_at", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
 
 
 class PredictionSerializer(serializers.ModelSerializer):
@@ -128,8 +198,11 @@ class RecentWinSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RecentWin
-        fields = ["id", "title", "summary", "odds", "settled_at", "image", "image_url", "is_published", "created_at"]
-        extra_kwargs = {"image": {"write_only": True, "required": False}}
+        fields = ["id", "caption", "settled_at", "image", "image_url", "is_published", "created_at"]
+        extra_kwargs = {
+            "caption": {"required": True, "allow_blank": False},
+            "image": {"write_only": True, "required": True},
+        }
 
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
