@@ -33,7 +33,7 @@ class PackageSerializer(serializers.ModelSerializer):
 class SubscriptionSerializer(serializers.ModelSerializer):
     package = PackageSerializer(read_only=True)
     user = UserSerializer(read_only=True)
-    approved_by_name = serializers.CharField(source="approved_by.display_name", read_only=True)
+    approved_by_name = serializers.CharField(source="approved_by.full_name", read_only=True)
     grants_access = serializers.ReadOnlyField()
 
     class Meta:
@@ -145,4 +145,3 @@ class TestimonialSerializer(serializers.ModelSerializer):
 
     def get_avatar_url(self, obj):
         return media_url(self.context.get("request"), obj.avatar)
-
