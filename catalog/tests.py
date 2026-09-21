@@ -9,9 +9,9 @@ from .models import Package, Prediction, Subscription
 
 class PremiumAccessTests(APITestCase):
     def setUp(self):
-        self.customer = User.objects.create_user(phone="0702000001", display_name="Member", password="member-pass-27")
-        self.other = User.objects.create_user(phone="0702000002", display_name="Other", password="member-pass-27")
-        self.owner = User.objects.create_superuser(phone="0702000003", display_name="Owner", password="owner-pass-27")
+        self.customer = User.objects.create_user(phone="0702000001", first_name="Member", last_name="One", password="member-pass-27")
+        self.other = User.objects.create_user(phone="0702000002", first_name="Other", last_name="Member", password="member-pass-27")
+        self.owner = User.objects.create_superuser(phone="0702000003", first_name="BK", last_name="Owner", password="owner-pass-27")
         self.package = Package.objects.create(
             name="Daily Edge",
             slug="daily-edge",
@@ -114,3 +114,29 @@ class PremiumAccessTests(APITestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_non_owner_staff_cannot_access_owner_dashboard(self):
+        staff = User.objects.create_user(
+            phone="0702000004",
+            first_name="Support",
+            last_name="Agent",
+            password="staff-pass-27",
+            is_staff=True,
+        )
+        self.client.force_login(staff)
+
+        response = self.client.get("/api/v1/owner/dashboard/")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_owner_can_review_authentication_activity(self):
+        self.client.post(
+            "/api/v1/auth/login/",
+            {"phone": self.customer.phone, "password": "wrong-password"},
+            format="json",
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.get("/api/v1/owner/activities/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data[0]["action"], "auth.login_failed")

@@ -4,12 +4,14 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import User
-from accounts.serializers import UserSerializer
+from accounts.models import ActivityLog, User
+from accounts.permissions import IsProductOwner
+from accounts.serializers import ActivityLogSerializer, UserSerializer
+from accounts.services import record_activity
 from .models import Package, Prediction, RecentWin, Subscription, Testimonial
 from .serializers import (
     PackageSerializer,
@@ -29,6 +31,31 @@ def expire_subscriptions(user=None):
     if user:
         query = query.filter(user=user)
     query.update(status=Subscription.Status.EXPIRED)
+
+
+class OwnerAuditMixin:
+    audit_category = ActivityLog.Category.CONTENT
+
+    def record_change(self, instance, verb):
+        record_activity(
+            self.request,
+            category=self.audit_category,
+            action=f"{instance._meta.model_name}.{verb}",
+            description=f"{self.request.user.full_name} {verb} {instance}.",
+            target=instance,
+        )
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        self.record_change(instance, "created")
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        self.record_change(instance, "updated")
+
+    def perform_destroy(self, instance):
+        self.record_change(instance, "deleted")
+        instance.delete()
 
 
 class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
@@ -76,6 +103,13 @@ class MySubscriptionsView(APIView):
         serializer = SubscriptionRequestSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         subscription = serializer.save()
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="subscription.requested",
+            description=f"{request.user.full_name} requested {subscription.package.name} access.",
+            target=subscription,
+        )
         return Response(
             SubscriptionSerializer(subscription, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -94,11 +128,18 @@ class CancelSubscriptionView(APIView):
         subscription.status = Subscription.Status.CANCELLED
         subscription.customer_message = "Cancelled by customer."
         subscription.save(update_fields=["status", "customer_message", "updated_at"])
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="subscription.cancelled_by_customer",
+            description=f"{request.user.full_name} cancelled {subscription.package.name} access.",
+            target=subscription,
+        )
         return Response(SubscriptionSerializer(subscription, context={"request": request}).data)
 
 
 class OwnerDashboardView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
     def get(self, request):
         expire_subscriptions()
@@ -117,16 +158,33 @@ class OwnerDashboardView(APIView):
                 ).values("id", "name", "request_count", "active_count").order_by("display_order")
             ),
             "informational_value": Subscription.objects.filter(status=Subscription.Status.ACTIVE).aggregate(total=Sum("price_snapshot"))["total"] or 0,
+            "recent_activity": ActivityLogSerializer(
+                ActivityLog.objects.select_related("actor")[:8], many=True
+            ).data,
         })
 
 
-class OwnerPackageViewSet(viewsets.ModelViewSet):
+class OwnerActivityViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = ActivityLogSerializer
+    permission_classes = [IsProductOwner]
+
+    def get_queryset(self):
+        queryset = ActivityLog.objects.select_related("actor")
+        category = self.request.query_params.get("category")
+        if category:
+            queryset = queryset.filter(category=category)
+        return queryset[:200]
+
+
+class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = Package.objects.all()
     serializer_class = PackageSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
     def destroy(self, request, *args, **kwargs):
         package = self.get_object()
+        package_id = package.pk
+        package_name = package.name
         try:
             package.delete()
         except ProtectedError:
@@ -134,22 +192,30 @@ class OwnerPackageViewSet(viewsets.ModelViewSet):
                 {"detail": "This package has subscription or prediction history. Close it instead of deleting it."},
                 status=status.HTTP_409_CONFLICT,
             )
+        record_activity(
+            request,
+            category=ActivityLog.Category.CONTENT,
+            action="package.deleted",
+            description=f"{request.user.full_name} deleted package {package_name}.",
+            metadata={"package_id": package_id, "package_name": package_name},
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class OwnerPredictionViewSet(viewsets.ModelViewSet):
+class OwnerPredictionViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = Prediction.objects.select_related("package").all()
     serializer_class = PredictionSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        instance = serializer.save(created_by=self.request.user)
+        self.record_change(instance, "created")
 
 
 class OwnerSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Subscription.objects.select_related("user", "package", "approved_by").all()
     serializer_class = SubscriptionSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
     @action(detail=True, methods=["post"])
     def decide(self, request, pk=None):
@@ -173,25 +239,33 @@ class OwnerSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
             subscription.owner_note = owner_note
             subscription.approved_by = request.user
             subscription.save()
+        action_past_tense = {"approve": "approved", "reject": "rejected", "cancel": "cancelled"}[decision]
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action=f"subscription.{action_past_tense}",
+            description=f"{request.user.full_name} {action_past_tense} {subscription.user.full_name}'s {subscription.package.name} request.",
+            target=subscription,
+        )
         return Response(SubscriptionSerializer(subscription, context={"request": request}).data)
 
 
-class OwnerRecentWinViewSet(viewsets.ModelViewSet):
+class OwnerRecentWinViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = RecentWin.objects.all()
     serializer_class = RecentWinSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
 
-class OwnerTestimonialViewSet(viewsets.ModelViewSet):
+class OwnerTestimonialViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = Testimonial.objects.all()
     serializer_class = TestimonialSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
 
 class OwnerCustomerViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = User.objects.filter(is_staff=False).order_by("-created_at")
     serializer_class = UserSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsProductOwner]
 
     @action(detail=True, methods=["post"])
     def block(self, request, pk=None):
@@ -199,4 +273,12 @@ class OwnerCustomerViewSet(viewsets.ReadOnlyModelViewSet):
         customer.is_blocked = bool(request.data.get("blocked", True))
         customer.is_active = not customer.is_blocked
         customer.save(update_fields=["is_blocked", "is_active", "updated_at"])
+        action = "blocked" if customer.is_blocked else "restored"
+        record_activity(
+            request,
+            category=ActivityLog.Category.ADMINISTRATION,
+            action=f"account.{action}",
+            description=f"{request.user.full_name} {action} {customer.full_name}'s account.",
+            target=customer,
+        )
         return Response(self.get_serializer(customer).data)

@@ -13,7 +13,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         owner, created = User.objects.get_or_create(
             phone="0700000000",
-            defaults={"display_name": "BK Owner", "is_staff": True, "is_superuser": True},
+            defaults={"first_name": "BK", "last_name": "Owner", "is_staff": True, "is_superuser": True},
         )
         if created or not owner.check_password("BKowner2026!"):
             owner.set_password("BKowner2026!")
@@ -77,4 +77,3 @@ class Command(BaseCommand):
             defaults={"quote": "The value is in the structure. I can see the market, timing and reasoning without noise.", "member_since": "Member since 2026", "is_published": True},
         )
         self.stdout.write(self.style.SUCCESS("Demo data ready. Owner login: 0700000000 / BKowner2026!"))
-

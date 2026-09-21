@@ -5,6 +5,7 @@ from .views import (
     CancelSubscriptionView,
     MySubscriptionsView,
     OwnerCustomerViewSet,
+    OwnerActivityViewSet,
     OwnerDashboardView,
     OwnerPackageViewSet,
     OwnerPredictionViewSet,
@@ -30,6 +31,7 @@ owner_router.register("subscriptions", OwnerSubscriptionViewSet, basename="owner
 owner_router.register("recent-wins", OwnerRecentWinViewSet, basename="owner-recent-win")
 owner_router.register("testimonials", OwnerTestimonialViewSet, basename="owner-testimonial")
 owner_router.register("customers", OwnerCustomerViewSet, basename="owner-customer")
+owner_router.register("activities", OwnerActivityViewSet, basename="owner-activity")
 
 urlpatterns = [
     path("", include(public_router.urls)),
@@ -38,4 +40,3 @@ urlpatterns = [
     path("owner/dashboard/", OwnerDashboardView.as_view(), name="owner-dashboard"),
     path("owner/", include(owner_router.urls)),
 ]
-
