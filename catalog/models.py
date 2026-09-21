@@ -1,7 +1,8 @@
 from datetime import timedelta
+from uuid import uuid4
 
 from django.conf import settings
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -9,9 +10,17 @@ from django.utils import timezone
 class Package(models.Model):
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=120, unique=True)
-    description = models.TextField()
+    package_type = models.CharField(max_length=80, default="Accumulator")
+    description = models.TextField(blank=True, default="")
     price = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
     currency = models.CharField(max_length=8, default="UGX")
+    win_probability = models.PositiveSmallIntegerField(
+        default=70,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    commences_at = models.DateTimeField(blank=True, null=True)
+    betslip_link = models.URLField(max_length=500, blank=True)
+    code = models.CharField(max_length=120, blank=True)
     duration_days = models.PositiveIntegerField(default=1)
     access_label = models.CharField(max_length=80, default="Premium predictions")
     benefits = models.JSONField(default=list, blank=True)
@@ -82,6 +91,37 @@ class Subscription(models.Model):
         return f"{self.user} · {self.package} · {self.status}"
 
 
+def payment_reference():
+    return f"BKP-{uuid4().hex[:12].upper()}"
+
+
+class Payment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+        FAILED = "failed", "Failed"
+        REFUNDED = "refunded", "Refunded"
+        CANCELLED = "cancelled", "Cancelled"
+
+    subscription = models.OneToOneField(Subscription, on_delete=models.PROTECT, related_name="payment")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="payments")
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
+    currency = models.CharField(max_length=8, default="UGX")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    reference = models.CharField(max_length=24, unique=True, default=payment_reference, editable=False)
+    provider = models.CharField(max_length=40, default="manual")
+    paid_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.reference} · {self.user} · {self.status}"
+
+
 class Prediction(models.Model):
     class Access(models.TextChoices):
         FREE = "free", "Free"
@@ -126,10 +166,11 @@ class Prediction(models.Model):
 
 
 class RecentWin(models.Model):
-    title = models.CharField(max_length=160)
-    summary = models.TextField()
+    caption = models.TextField(blank=True, default="")
+    title = models.CharField(max_length=160, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
     odds = models.DecimalField(max_digits=7, decimal_places=2, blank=True, null=True)
-    settled_at = models.DateTimeField()
+    settled_at = models.DateTimeField(default=timezone.now)
     image = models.ImageField(upload_to="wins/", blank=True, null=True)
     is_published = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -138,7 +179,7 @@ class RecentWin(models.Model):
         ordering = ["-settled_at"]
 
     def __str__(self):
-        return self.title
+        return self.caption[:80] or self.title or f"Recent win {self.pk}"
 
 
 class Testimonial(models.Model):
@@ -155,4 +196,3 @@ class Testimonial(models.Model):
 
     def __str__(self):
         return self.member_name
-

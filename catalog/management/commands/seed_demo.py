@@ -22,20 +22,24 @@ class Command(BaseCommand):
             owner.save()
 
         packages = [
-            ("Daily Edge", "daily-edge", 10000, 1, "A focused matchday shortlist", ["Daily shortlist", "Full market and odds", "Owner-curated analysis"], True),
-            ("Weekend Board", "weekend-board", 35000, 7, "Coverage across the full football weekend", ["Seven-day access", "Multiple leagues", "Results tracking"], False),
-            ("Season Desk", "season-desk", 90000, 30, "Ongoing access for disciplined followers", ["Thirty-day access", "All standard packages", "Priority releases"], False),
+            ("Daily Edge", "daily-edge", "Accumulator", 10000, 1, 78, 4, "BK-DAY-78", True),
+            ("Weekend Board", "weekend-board", "Weekend combo", 35000, 7, 82, 20, "BK-WKD-82", False),
+            ("Season Desk", "season-desk", "VIP accumulator", 90000, 30, 86, 28, "BK-VIP-86", False),
         ]
         package_objects = []
-        for order, (name, slug, price, duration, description, benefits, featured) in enumerate(packages):
+        now = timezone.now()
+        for order, (name, slug, package_type, price, duration, probability, starts_in, code, featured) in enumerate(packages):
             package, _ = Package.objects.update_or_create(
                 slug=slug,
                 defaults={
                     "name": name,
+                    "package_type": package_type,
                     "price": price,
                     "duration_days": duration,
-                    "description": description,
-                    "benefits": benefits,
+                    "win_probability": probability,
+                    "commences_at": now + timedelta(hours=starts_in),
+                    "betslip_link": "https://example.com/betslip/" + slug,
+                    "code": code,
                     "is_featured": featured,
                     "is_active": True,
                     "display_order": order,
@@ -43,7 +47,6 @@ class Command(BaseCommand):
             )
             package_objects.append(package)
 
-        now = timezone.now()
         predictions = [
             ("Arsenal", "Newcastle", "Premier League", 4, "free", None, "Total goals", "Over 1.5", "1.42", 76, "Both teams have produced high-volume final-third entries across their recent fixtures."),
             ("Inter Milan", "Atalanta", "Serie A", 7, "premium", package_objects[0], "Match result", "Inter Milan to win", "1.84", 81, "Inter's rest advantage and central progression profile create the stronger match-up."),
@@ -70,7 +73,7 @@ class Command(BaseCommand):
 
         RecentWin.objects.get_or_create(
             title="Three-match weekend sequence",
-            defaults={"summary": "A measured weekend board settled with all three selections landing.", "odds": "4.63", "settled_at": now - timedelta(days=2), "is_published": True},
+            defaults={"caption": "Three-match weekend package won at combined odds of 4.63.", "summary": "A measured weekend board settled with all three selections landing.", "odds": "4.63", "settled_at": now - timedelta(days=2), "is_published": True},
         )
         Testimonial.objects.get_or_create(
             member_name="Daniel K.",

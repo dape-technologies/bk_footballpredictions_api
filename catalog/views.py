@@ -12,9 +12,11 @@ from accounts.models import ActivityLog, User
 from accounts.permissions import IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
-from .models import Package, Prediction, RecentWin, Subscription, Testimonial
+from .models import Package, Payment, Prediction, RecentWin, Subscription, Testimonial
 from .serializers import (
     PackageSerializer,
+    PaymentSerializer,
+    PublicPackageSerializer,
     PredictionSerializer,
     RecentWinSerializer,
     SubscriptionRequestSerializer,
@@ -59,7 +61,7 @@ class OwnerAuditMixin:
 
 
 class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class = PackageSerializer
+    serializer_class = PublicPackageSerializer
     permission_classes = [AllowAny]
     lookup_field = "slug"
 
@@ -96,13 +98,14 @@ class MySubscriptionsView(APIView):
 
     def get(self, request):
         expire_subscriptions(request.user)
-        subscriptions = request.user.subscriptions.select_related("package", "approved_by")
+        subscriptions = request.user.subscriptions.select_related("package", "approved_by", "payment")
         return Response(SubscriptionSerializer(subscriptions, many=True, context={"request": request}).data)
 
     def post(self, request):
         serializer = SubscriptionRequestSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        subscription = serializer.save()
+        with transaction.atomic():
+            subscription = serializer.save()
         record_activity(
             request,
             category=ActivityLog.Category.SUBSCRIPTION,
@@ -128,6 +131,10 @@ class CancelSubscriptionView(APIView):
         subscription.status = Subscription.Status.CANCELLED
         subscription.customer_message = "Cancelled by customer."
         subscription.save(update_fields=["status", "customer_message", "updated_at"])
+        payment = getattr(subscription, "payment", None)
+        if payment and payment.status == Payment.Status.PENDING:
+            payment.status = Payment.Status.CANCELLED
+            payment.save(update_fields=["status", "updated_at"])
         record_activity(
             request,
             category=ActivityLog.Category.SUBSCRIPTION,
@@ -143,24 +150,18 @@ class OwnerDashboardView(APIView):
 
     def get(self, request):
         expire_subscriptions()
-        today = timezone.localdate()
         return Response({
             "customers": User.objects.filter(is_staff=False).count(),
-            "pending_requests": Subscription.objects.filter(status=Subscription.Status.PENDING).count(),
-            "active_subscriptions": Subscription.objects.filter(status=Subscription.Status.ACTIVE).count(),
-            "published_predictions": Prediction.objects.filter(is_published=True).count(),
-            "wins": Prediction.objects.filter(result=Prediction.Result.WON).count(),
-            "today_predictions": Prediction.objects.filter(kickoff_at__date=today).count(),
+            "active_packages": Package.objects.filter(is_active=True).count(),
+            "pending_payments": Payment.objects.filter(status=Payment.Status.PENDING).count(),
+            "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
+            "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,
             "package_demand": list(
                 Package.objects.annotate(
                     request_count=Count("subscriptions"),
                     active_count=Count("subscriptions", filter=Q(subscriptions__status=Subscription.Status.ACTIVE)),
                 ).values("id", "name", "request_count", "active_count").order_by("display_order")
             ),
-            "informational_value": Subscription.objects.filter(status=Subscription.Status.ACTIVE).aggregate(total=Sum("price_snapshot"))["total"] or 0,
-            "recent_activity": ActivityLogSerializer(
-                ActivityLog.objects.select_related("actor")[:8], many=True
-            ).data,
         })
 
 
@@ -200,6 +201,63 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
             metadata={"package_id": package_id, "package_name": package_name},
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Payment.objects.select_related("user", "package", "subscription").all()
+    serializer_class = PaymentSerializer
+    permission_classes = [IsProductOwner]
+
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        decision = request.data.get("decision")
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().select_related("subscription", "package", "user").get(pk=self.get_object().pk)
+            subscription = payment.subscription
+
+            if decision == "confirm":
+                if payment.status != Payment.Status.PENDING:
+                    return Response({"detail": "Only pending payments can be confirmed."}, status=status.HTTP_409_CONFLICT)
+                payment.status = Payment.Status.PAID
+                payment.paid_at = timezone.now()
+                payment.save(update_fields=["status", "paid_at", "updated_at"])
+                subscription.activate(request.user)
+                subscription.customer_message = "Payment confirmed. Your betslip is ready."
+                subscription.activation_source = "payment"
+                subscription.save(update_fields=["customer_message", "activation_source", "updated_at"])
+                activity_action = "payment.confirmed"
+                activity_description = f"{request.user.full_name} confirmed {payment.reference}."
+            elif decision == "fail":
+                if payment.status != Payment.Status.PENDING:
+                    return Response({"detail": "Only pending payments can be marked failed."}, status=status.HTTP_409_CONFLICT)
+                payment.status = Payment.Status.FAILED
+                payment.save(update_fields=["status", "updated_at"])
+                subscription.status = Subscription.Status.REJECTED
+                subscription.customer_message = "Payment was not confirmed."
+                subscription.save(update_fields=["status", "customer_message", "updated_at"])
+                activity_action = "payment.failed"
+                activity_description = f"{request.user.full_name} marked {payment.reference} as failed."
+            elif decision == "refund":
+                if payment.status != Payment.Status.PAID:
+                    return Response({"detail": "Only paid payments can be refunded."}, status=status.HTTP_409_CONFLICT)
+                payment.status = Payment.Status.REFUNDED
+                payment.save(update_fields=["status", "updated_at"])
+                subscription.status = Subscription.Status.CANCELLED
+                subscription.customer_message = "Payment refunded. Betslip access is closed."
+                subscription.save(update_fields=["status", "customer_message", "updated_at"])
+                activity_action = "payment.refunded"
+                activity_description = f"{request.user.full_name} refunded {payment.reference}."
+            else:
+                return Response({"detail": "Choose confirm, fail, or refund."}, status=status.HTTP_400_BAD_REQUEST)
+
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action=activity_action,
+            description=activity_description,
+            target=payment,
+        )
+        return Response(PaymentSerializer(payment, context={"request": request}).data)
 
 
 class OwnerPredictionViewSet(OwnerAuditMixin, viewsets.ModelViewSet):

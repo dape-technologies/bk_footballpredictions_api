@@ -167,3 +167,40 @@ class AuthenticationTests(APITestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_customer_cannot_create_an_admin_session(self):
+        User.objects.create_user(
+            phone="0701112288",
+            first_name="Regular",
+            last_name="Customer",
+            password="strong-pass-27",
+        )
+
+        response = self.client.post(
+            reverse("admin-login"),
+            {"phone": "0701112288", "password": "strong-pass-27"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("sessionid", self.client.cookies)
+
+    def test_product_owner_can_create_an_admin_session(self):
+        owner = User.objects.create_user(
+            phone="0701112299",
+            first_name="Product",
+            last_name="Owner",
+            password="strong-pass-27",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+        response = self.client.post(
+            reverse("admin-login"),
+            {"phone": owner.phone, "password": "strong-pass-27"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_owner"])
+        self.assertIn("sessionid", self.client.cookies)

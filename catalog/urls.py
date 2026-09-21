@@ -8,6 +8,7 @@ from .views import (
     OwnerActivityViewSet,
     OwnerDashboardView,
     OwnerPackageViewSet,
+    OwnerPaymentViewSet,
     OwnerPredictionViewSet,
     OwnerRecentWinViewSet,
     OwnerSubscriptionViewSet,
@@ -26,6 +27,7 @@ public_router.register("testimonials", PublicTestimonialViewSet, basename="testi
 
 owner_router = DefaultRouter()
 owner_router.register("packages", OwnerPackageViewSet, basename="owner-package")
+owner_router.register("payments", OwnerPaymentViewSet, basename="owner-payment")
 owner_router.register("predictions", OwnerPredictionViewSet, basename="owner-prediction")
 owner_router.register("subscriptions", OwnerSubscriptionViewSet, basename="owner-subscription")
 owner_router.register("recent-wins", OwnerRecentWinViewSet, basename="owner-recent-win")
