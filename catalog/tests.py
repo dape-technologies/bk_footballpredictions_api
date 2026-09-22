@@ -70,6 +70,36 @@ class PremiumAccessTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, [])
 
+    def test_owner_package_toggle_controls_public_visibility(self):
+        self.client.force_login(self.owner)
+
+        deactivate = self.client.patch(
+            f"/api/v1/owner/packages/{self.package.pk}/",
+            {"is_active": False},
+            format="json",
+        )
+        self.assertEqual(deactivate.status_code, 200)
+        self.assertFalse(deactivate.data["is_active"])
+
+        self.client.logout()
+        hidden = self.client.get("/api/v1/packages/")
+        self.assertEqual(hidden.status_code, 200)
+        self.assertEqual(hidden.data, [])
+
+        self.client.force_login(self.owner)
+        reactivate = self.client.patch(
+            f"/api/v1/owner/packages/{self.package.pk}/",
+            {"is_active": True},
+            format="json",
+        )
+        self.assertEqual(reactivate.status_code, 200)
+        self.assertTrue(reactivate.data["is_active"])
+
+        self.client.logout()
+        visible = self.client.get("/api/v1/packages/")
+        self.assertEqual(visible.status_code, 200)
+        self.assertEqual([item["id"] for item in visible.data], [self.package.pk])
+
     def test_pending_request_does_not_unlock_content(self):
         Subscription.objects.create(user=self.customer, package=self.package, price_snapshot=self.package.price)
         self.client.force_login(self.customer)
