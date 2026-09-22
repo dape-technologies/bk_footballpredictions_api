@@ -29,6 +29,7 @@ class Package(models.Model):
     is_featured = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
     request_deadline = models.DateTimeField(blank=True, null=True)
+    deleted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

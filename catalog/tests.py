@@ -100,6 +100,39 @@ class PremiumAccessTests(APITestCase):
         self.assertEqual(visible.status_code, 200)
         self.assertEqual([item["id"] for item in visible.data], [self.package.pk])
 
+    def test_owner_can_delete_package_with_purchase_and_prediction_history(self):
+        subscription = Subscription.objects.create(
+            user=self.customer,
+            package=self.package,
+            price_snapshot=self.package.price,
+        )
+        payment = Payment.objects.create(
+            subscription=subscription,
+            user=self.customer,
+            package=self.package,
+            amount=self.package.price,
+        )
+        self.client.force_login(self.owner)
+
+        response = self.client.delete(f"/api/v1/owner/packages/{self.package.pk}/")
+
+        self.assertEqual(response.status_code, 204)
+        self.package.refresh_from_db()
+        self.assertFalse(self.package.is_active)
+        self.assertIsNotNone(self.package.deleted_at)
+        self.assertTrue(Subscription.objects.filter(pk=subscription.pk).exists())
+        self.assertTrue(Payment.objects.filter(pk=payment.pk).exists())
+        self.assertTrue(Prediction.objects.filter(pk=self.prediction.pk).exists())
+        self.assertEqual(self.client.get("/api/v1/owner/packages/").data, [])
+
+        dashboard = self.client.get("/api/v1/owner/dashboard/")
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(dashboard.data["active_packages"], 0)
+        self.assertEqual(dashboard.data["package_demand"], [])
+
+        self.client.logout()
+        self.assertEqual(self.client.get("/api/v1/packages/").data, [])
+
     def test_pending_request_does_not_unlock_content(self):
         Subscription.objects.create(user=self.customer, package=self.package, price_snapshot=self.package.price)
         self.client.force_login(self.customer)

@@ -1,5 +1,4 @@
 from django.db import transaction
-from django.db.models.deletion import ProtectedError
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -66,7 +65,7 @@ class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = "slug"
 
     def get_queryset(self):
-        return Package.objects.filter(is_active=True)
+        return Package.objects.filter(is_active=True, deleted_at__isnull=True)
 
 
 class PublicPredictionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -152,12 +151,12 @@ class OwnerDashboardView(APIView):
         expire_subscriptions()
         return Response({
             "customers": User.objects.filter(is_staff=False).count(),
-            "active_packages": Package.objects.filter(is_active=True).count(),
+            "active_packages": Package.objects.filter(is_active=True, deleted_at__isnull=True).count(),
             "pending_payments": Payment.objects.filter(status=Payment.Status.PENDING).count(),
             "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
             "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,
             "package_demand": list(
-                Package.objects.annotate(
+                Package.objects.filter(deleted_at__isnull=True).annotate(
                     request_count=Count("subscriptions"),
                     active_count=Count("subscriptions", filter=Q(subscriptions__status=Subscription.Status.ACTIVE)),
                 ).values("id", "name", "request_count", "active_count").order_by("display_order")
@@ -178,7 +177,7 @@ class OwnerActivityViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
-    queryset = Package.objects.all()
+    queryset = Package.objects.filter(deleted_at__isnull=True)
     serializer_class = PackageSerializer
     permission_classes = [IsProductOwner]
 
@@ -186,13 +185,9 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
         package = self.get_object()
         package_id = package.pk
         package_name = package.name
-        try:
-            package.delete()
-        except ProtectedError:
-            return Response(
-                {"detail": "This package has subscription or prediction history. Close it instead of deleting it."},
-                status=status.HTTP_409_CONFLICT,
-            )
+        package.is_active = False
+        package.deleted_at = timezone.now()
+        package.save(update_fields=["is_active", "deleted_at", "updated_at"])
         record_activity(
             request,
             category=ActivityLog.Category.CONTENT,
