@@ -28,6 +28,13 @@ Change production credentials and never run the demo seed in production.
 
 Premium response fields are removed by the API unless the requester owns an active, unexpired subscription to the prediction's package.
 
+## Deployment
+
+Pushes to the `marcdemo` branch run the Django checks and tests, then deploy a
+staged release to the configured Namecheap cPanel application through GitHub
+Actions. The complete cPanel, PostgreSQL, SSH-key, and GitHub environment setup
+is documented in the web repository's `DEPLOYMENT.md`.
+
 ## Accounts and access
 
 Registration accepts `first_name`, `surname`, `date_of_birth`, `phone`, `password`, and `password_confirm`. The API rejects anyone who has not reached their eighteenth birthday. Phone numbers are normalized before the database-level uniqueness check, and both password fields must match. Login accepts only `phone` and `password`. Browser authentication uses an HTTP-only Django session with CSRF protection; passwords are stored with Django's password hasher and are never returned by the API.

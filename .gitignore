@@ -6,4 +6,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+frontend_dist/
+staticfiles/
 
