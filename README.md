@@ -34,6 +34,14 @@ Copy the values from `.env.example` into the deployment environment. Configure t
 
 Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
 
+## Deployment
+
+Pull requests into `main` run the Django checks and tests. After a pull request
+is merged, the resulting push to `main` deploys a staged release to the
+configured Namecheap cPanel application through GitHub Actions. The complete
+cPanel, MariaDB, SSH-key, and GitHub environment setup is documented in the
+web repository's `DEPLOYMENT.md`.
+
 ## Accounts and access
 
 Registration accepts `first_name`, `surname`, `date_of_birth`, `phone`, `password`, and `password_confirm`. The API rejects anyone who has not reached their eighteenth birthday. Phone numbers are normalized before the database-level uniqueness check, and both password fields must match. Login accepts only `phone` and `password`. Browser authentication uses an HTTP-only Django session with CSRF protection; passwords are stored with Django's password hasher and are never returned by the API.
