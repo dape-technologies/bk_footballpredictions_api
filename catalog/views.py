@@ -1,6 +1,14 @@
+import base64
+import hashlib
+import hmac
+import time
+from decimal import Decimal, InvalidOperation
+
+from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Case, Count, IntegerField, Q, Sum, When
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -11,27 +19,19 @@ from accounts.models import ActivityLog, User
 from accounts.permissions import IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
-from .models import Package, Payment, Prediction, RecentWin, Subscription, Testimonial
+from .models import Package, Payment, Prediction, Purchase, RecentWin, Testimonial
+from .relworx import RelworxError, request_mobile_money_payment
 from .serializers import (
     PackageSerializer,
+    PaymentAttemptSerializer,
     PaymentSerializer,
     PublicPackageSerializer,
     PredictionSerializer,
+    PurchaseCreateSerializer,
+    PurchaseSerializer,
     RecentWinSerializer,
-    SubscriptionRequestSerializer,
-    SubscriptionSerializer,
     TestimonialSerializer,
 )
-
-
-def expire_subscriptions(user=None):
-    query = Subscription.objects.filter(
-        status=Subscription.Status.ACTIVE,
-        expires_at__lte=timezone.now(),
-    )
-    if user:
-        query = query.filter(user=user)
-    query.update(status=Subscription.Status.EXPIRED)
 
 
 class OwnerAuditMixin:
@@ -65,7 +65,14 @@ class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_field = "slug"
 
     def get_queryset(self):
-        return Package.objects.filter(is_active=True, deleted_at__isnull=True)
+        now = timezone.now()
+        return Package.objects.filter(deleted_at__isnull=True).annotate(
+            open_order=Case(
+                When(closes_at__gt=now, then=0),
+                default=1,
+                output_field=IntegerField(),
+            )
+        ).order_by("open_order", "display_order", "price", "name")
 
 
 class PublicPredictionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -92,74 +99,248 @@ class PublicTestimonialViewSet(viewsets.ReadOnlyModelViewSet):
         return Testimonial.objects.filter(is_published=True)
 
 
-class MySubscriptionsView(APIView):
+class MyPurchasesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        expire_subscriptions(request.user)
-        subscriptions = request.user.subscriptions.select_related("package", "approved_by", "payment")
-        return Response(SubscriptionSerializer(subscriptions, many=True, context={"request": request}).data)
+        purchases = request.user.purchases.select_related("package", "user").prefetch_related("payments__package", "payments__user")
+        return Response(PurchaseSerializer(purchases, many=True, context={"request": request}).data)
 
     def post(self, request):
-        serializer = SubscriptionRequestSerializer(data=request.data, context={"request": request})
+        serializer = PurchaseCreateSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
-            subscription = serializer.save()
+            purchase = serializer.save()
         record_activity(
             request,
             category=ActivityLog.Category.SUBSCRIPTION,
-            action="subscription.requested",
-            description=f"{request.user.full_name} requested {subscription.package.name} access.",
-            target=subscription,
+            action="purchase.created",
+            description=f"{request.user.full_name} started a purchase for {purchase.package.name}.",
+            target=purchase,
         )
-        return Response(
-            SubscriptionSerializer(subscription, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
-        )
+        purchase = Purchase.objects.select_related("package", "user").prefetch_related("payments__package", "payments__user").get(pk=purchase.pk)
+        response_status = status.HTTP_201_CREATED if getattr(serializer, "was_created", False) else status.HTTP_200_OK
+        return Response(PurchaseSerializer(purchase, context={"request": request}).data, status=response_status)
 
 
-class CancelSubscriptionView(APIView):
+class MyPurchaseDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        purchase = request.user.purchases.select_related("package", "user").prefetch_related("payments__package", "payments__user").filter(pk=pk).first()
+        if not purchase:
+            return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PurchaseSerializer(purchase, context={"request": request}).data)
+
+
+class PaymentAttemptView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        subscription = request.user.subscriptions.filter(pk=pk).first()
-        if not subscription:
-            return Response({"detail": "Subscription not found."}, status=status.HTTP_404_NOT_FOUND)
-        if subscription.status not in [Subscription.Status.PENDING, Subscription.Status.ACTIVE]:
-            return Response({"detail": "This subscription cannot be cancelled."}, status=status.HTTP_409_CONFLICT)
-        subscription.status = Subscription.Status.CANCELLED
-        subscription.customer_message = "Cancelled by customer."
-        subscription.save(update_fields=["status", "customer_message", "updated_at"])
-        payment = getattr(subscription, "payment", None)
-        if payment and payment.status == Payment.Status.PENDING:
-            payment.status = Payment.Status.CANCELLED
-            payment.save(update_fields=["status", "updated_at"])
+        serializer = PaymentAttemptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            purchase = Purchase.objects.select_for_update().select_related("package").filter(pk=pk, user=request.user).first()
+            if not purchase:
+                return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
+            if purchase.is_paid:
+                return Response({"detail": "This package has already been purchased."}, status=status.HTTP_409_CONFLICT)
+            if not purchase.package.is_open:
+                return Response({"detail": "This package is closed and cannot be purchased."}, status=status.HTTP_409_CONFLICT)
+            if purchase.payments.filter(status=Payment.Status.PENDING).exists():
+                return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
+            payment = Payment.objects.create(
+                purchase=purchase,
+                user=request.user,
+                package=purchase.package,
+                amount=purchase.price_snapshot,
+                currency=purchase.currency_snapshot,
+                payer_msisdn=serializer.validated_data["phone"],
+            )
+        try:
+            provider_response = request_mobile_money_payment(payment)
+        except RelworxError as error:
+            payment.provider_message = str(error)[:240]
+            update_fields = ["provider_message", "updated_at"]
+            if not error.uncertain:
+                payment.status = Payment.Status.FAILED
+                update_fields.insert(0, "status")
+            payment.save(update_fields=update_fields)
+            record_activity(
+                request,
+                category=ActivityLog.Category.SUBSCRIPTION,
+                action="payment.initiation_uncertain" if error.uncertain else "payment.initiation_failed",
+                description=f"Relworx payment initiation was {'uncertain' if error.uncertain else 'rejected'} for {payment.reference}.",
+                target=payment,
+            )
+            if error.uncertain:
+                return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
+            return Response({"detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        payment.internal_reference = str(provider_response["internal_reference"])
+        payment.provider_message = str(provider_response.get("message", "Payment request sent."))[:240]
+        payment.save(update_fields=["internal_reference", "provider_message", "updated_at"])
         record_activity(
             request,
             category=ActivityLog.Category.SUBSCRIPTION,
-            action="subscription.cancelled_by_customer",
-            description=f"{request.user.full_name} cancelled {subscription.package.name} access.",
-            target=subscription,
+            action="payment.initiated",
+            description=f"Relworx payment {payment.reference} was initiated.",
+            target=payment,
+            metadata={"provider": "relworx"},
         )
-        return Response(SubscriptionSerializer(subscription, context={"request": request}).data)
+        return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
+
+
+def verify_relworx_signature(request, payload):
+    header = request.headers.get("Relworx-Signature", "")
+    parts = {}
+    for item in header.split(","):
+        key, separator, value = item.strip().partition("=")
+        if separator:
+            parts[key] = value
+    try:
+        timestamp = int(parts.get("t", ""))
+    except ValueError:
+        return False
+    if abs(int(time.time()) - timestamp) > settings.RELWORX_WEBHOOK_TOLERANCE_SECONDS:
+        return False
+    if not settings.RELWORX_WEBHOOK_SIGNING_KEY or not settings.RELWORX_WEBHOOK_URL:
+        return False
+
+    signed = f"{settings.RELWORX_WEBHOOK_URL}{timestamp}"
+    for key in sorted(["status", "customer_reference", "internal_reference"]):
+        signed += f"{key}{payload.get(key, '')}"
+    digest = hmac.new(
+        settings.RELWORX_WEBHOOK_SIGNING_KEY.encode("utf-8"),
+        signed.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    supplied = parts.get("v", "")
+    return hmac.compare_digest(supplied, digest.hex()) or hmac.compare_digest(
+        supplied, base64.b64encode(digest).decode("ascii")
+    )
+
+
+class RelworxWebhookView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+        reference = str(payload.get("customer_reference", ""))
+        if not verify_relworx_signature(request, payload):
+            record_activity(
+                request,
+                category=ActivityLog.Category.SUBSCRIPTION,
+                action="payment.webhook_rejected",
+                description="A Relworx webhook signature was rejected.",
+                metadata={"reference": reference[:24]},
+            )
+            return Response({"detail": "Invalid webhook signature."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        with transaction.atomic():
+            payment = Payment.objects.select_for_update().select_related("purchase__package").filter(reference=reference).first()
+            if not payment:
+                record_activity(
+                    request,
+                    category=ActivityLog.Category.SUBSCRIPTION,
+                    action="payment.webhook_unmatched",
+                    description="A signed Relworx webhook had no matching payment.",
+                    metadata={"reference": reference[:24]},
+                )
+                return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            internal_reference = str(payload.get("internal_reference", ""))
+            if payment.internal_reference and not hmac.compare_digest(payment.internal_reference, internal_reference):
+                return self._reject_mismatch(request, payment, "internal reference")
+
+            provider_status = str(payload.get("status", "")).lower()
+            safe_payload = {
+                key: payload.get(key)
+                for key in ["status", "customer_reference", "internal_reference", "currency", "amount", "provider", "charge", "completed_at"]
+                if key in payload
+            }
+            if provider_status == "success":
+                try:
+                    amount = Decimal(str(payload.get("amount")))
+                except (InvalidOperation, TypeError):
+                    return self._reject_mismatch(request, payment, "amount")
+                if amount != payment.amount:
+                    return self._reject_mismatch(request, payment, "amount")
+                if str(payload.get("currency", "")).upper() != payment.currency.upper():
+                    return self._reject_mismatch(request, payment, "currency")
+                if payment.status == Payment.Status.PAID:
+                    record_activity(
+                        request,
+                        category=ActivityLog.Category.SUBSCRIPTION,
+                        action="payment.webhook_duplicate",
+                        description=f"Duplicate success webhook received for {payment.reference}.",
+                        target=payment,
+                    )
+                    return Response({"status": "ok"})
+
+                completed_at = parse_datetime(str(payload.get("completed_at", ""))) or timezone.now()
+                payment.status = Payment.Status.PAID
+                payment.paid_at = completed_at
+                payment.provider_message = str(payload.get("message", "Payment completed successfully."))[:240]
+                payment.provider_payload = safe_payload
+                payment.save(update_fields=["status", "paid_at", "provider_message", "provider_payload", "updated_at"])
+                payment.purchase.complete(completed_at)
+                record_activity(
+                    request,
+                    category=ActivityLog.Category.SUBSCRIPTION,
+                    action="payment.completed",
+                    description=f"Relworx payment {payment.reference} completed.",
+                    target=payment,
+                    metadata={"provider": "relworx"},
+                )
+            elif provider_status == "failed":
+                if payment.status == Payment.Status.PAID:
+                    return Response({"status": "ok"})
+                payment.status = Payment.Status.FAILED
+                payment.provider_message = str(payload.get("message", "Payment failed."))[:240]
+                payment.provider_payload = safe_payload
+                payment.save(update_fields=["status", "provider_message", "provider_payload", "updated_at"])
+                record_activity(
+                    request,
+                    category=ActivityLog.Category.SUBSCRIPTION,
+                    action="payment.failed",
+                    description=f"Relworx payment {payment.reference} failed.",
+                    target=payment,
+                )
+            else:
+                return Response({"detail": "Unsupported payment status."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"status": "ok"})
+
+    @staticmethod
+    def _reject_mismatch(request, payment, field):
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="payment.webhook_mismatch",
+            description=f"Relworx webhook {field} mismatch for {payment.reference}.",
+            target=payment,
+            metadata={"field": field},
+        )
+        return Response({"detail": f"Payment {field} mismatch."}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class OwnerDashboardView(APIView):
     permission_classes = [IsProductOwner]
 
     def get(self, request):
-        expire_subscriptions()
+        now = timezone.now()
         return Response({
             "customers": User.objects.filter(is_staff=False).count(),
-            "active_packages": Package.objects.filter(is_active=True, deleted_at__isnull=True).count(),
+            "active_packages": Package.objects.filter(deleted_at__isnull=True, closes_at__gt=now).count(),
             "pending_payments": Payment.objects.filter(status=Payment.Status.PENDING).count(),
             "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
             "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,
             "package_demand": list(
                 Package.objects.filter(deleted_at__isnull=True).annotate(
-                    request_count=Count("subscriptions"),
-                    active_count=Count("subscriptions", filter=Q(subscriptions__status=Subscription.Status.ACTIVE)),
-                ).values("id", "name", "request_count", "active_count").order_by("display_order")
+                    request_count=Count("purchases"),
+                    paid_count=Count("purchases", filter=Q(purchases__paid_at__isnull=False)),
+                ).values("id", "name", "request_count", "paid_count").order_by("display_order")
             ),
         })
 
@@ -183,76 +364,22 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         package = self.get_object()
-        package_id = package.pk
-        package_name = package.name
-        package.is_active = False
         package.deleted_at = timezone.now()
-        package.save(update_fields=["is_active", "deleted_at", "updated_at"])
+        package.save(update_fields=["deleted_at", "updated_at"])
         record_activity(
             request,
             category=ActivityLog.Category.CONTENT,
             action="package.deleted",
-            description=f"{request.user.full_name} deleted package {package_name}.",
-            metadata={"package_id": package_id, "package_name": package_name},
+            description=f"{request.user.full_name} deleted package {package.name}.",
+            metadata={"package_id": package.pk, "package_name": package.name},
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Payment.objects.select_related("user", "package", "subscription").all()
+    queryset = Payment.objects.select_related("user", "package", "purchase").all()
     serializer_class = PaymentSerializer
     permission_classes = [IsProductOwner]
-
-    @action(detail=True, methods=["post"])
-    def resolve(self, request, pk=None):
-        decision = request.data.get("decision")
-        with transaction.atomic():
-            payment = Payment.objects.select_for_update().select_related("subscription", "package", "user").get(pk=self.get_object().pk)
-            subscription = payment.subscription
-
-            if decision == "confirm":
-                if payment.status != Payment.Status.PENDING:
-                    return Response({"detail": "Only pending payments can be confirmed."}, status=status.HTTP_409_CONFLICT)
-                payment.status = Payment.Status.PAID
-                payment.paid_at = timezone.now()
-                payment.save(update_fields=["status", "paid_at", "updated_at"])
-                subscription.activate(request.user)
-                subscription.customer_message = "Payment confirmed. Your betslip is ready."
-                subscription.activation_source = "payment"
-                subscription.save(update_fields=["customer_message", "activation_source", "updated_at"])
-                activity_action = "payment.confirmed"
-                activity_description = f"{request.user.full_name} confirmed {payment.reference}."
-            elif decision == "fail":
-                if payment.status != Payment.Status.PENDING:
-                    return Response({"detail": "Only pending payments can be marked failed."}, status=status.HTTP_409_CONFLICT)
-                payment.status = Payment.Status.FAILED
-                payment.save(update_fields=["status", "updated_at"])
-                subscription.status = Subscription.Status.REJECTED
-                subscription.customer_message = "Payment was not confirmed."
-                subscription.save(update_fields=["status", "customer_message", "updated_at"])
-                activity_action = "payment.failed"
-                activity_description = f"{request.user.full_name} marked {payment.reference} as failed."
-            elif decision == "refund":
-                if payment.status != Payment.Status.PAID:
-                    return Response({"detail": "Only paid payments can be refunded."}, status=status.HTTP_409_CONFLICT)
-                payment.status = Payment.Status.REFUNDED
-                payment.save(update_fields=["status", "updated_at"])
-                subscription.status = Subscription.Status.CANCELLED
-                subscription.customer_message = "Payment refunded. Betslip access is closed."
-                subscription.save(update_fields=["status", "customer_message", "updated_at"])
-                activity_action = "payment.refunded"
-                activity_description = f"{request.user.full_name} refunded {payment.reference}."
-            else:
-                return Response({"detail": "Choose confirm, fail, or refund."}, status=status.HTTP_400_BAD_REQUEST)
-
-        record_activity(
-            request,
-            category=ActivityLog.Category.SUBSCRIPTION,
-            action=activity_action,
-            description=activity_description,
-            target=payment,
-        )
-        return Response(PaymentSerializer(payment, context={"request": request}).data)
 
 
 class OwnerPredictionViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
@@ -263,44 +390,6 @@ class OwnerPredictionViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         instance = serializer.save(created_by=self.request.user)
         self.record_change(instance, "created")
-
-
-class OwnerSubscriptionViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Subscription.objects.select_related("user", "package", "approved_by").all()
-    serializer_class = SubscriptionSerializer
-    permission_classes = [IsProductOwner]
-
-    @action(detail=True, methods=["post"])
-    def decide(self, request, pk=None):
-        subscription = self.get_object()
-        decision = request.data.get("decision")
-        message = str(request.data.get("customer_message", ""))[:240]
-        owner_note = str(request.data.get("owner_note", ""))
-        with transaction.atomic():
-            subscription = Subscription.objects.select_for_update().get(pk=subscription.pk)
-            if decision == "approve":
-                subscription.activate(request.user)
-                subscription.customer_message = message or "Access approved. Your premium predictions are ready."
-            elif decision == "reject":
-                subscription.status = Subscription.Status.REJECTED
-                subscription.customer_message = message or "This access request was not approved."
-            elif decision == "cancel":
-                subscription.status = Subscription.Status.CANCELLED
-                subscription.customer_message = message or "This access was cancelled by the owner."
-            else:
-                return Response({"detail": "Choose approve, reject, or cancel."}, status=status.HTTP_400_BAD_REQUEST)
-            subscription.owner_note = owner_note
-            subscription.approved_by = request.user
-            subscription.save()
-        action_past_tense = {"approve": "approved", "reject": "rejected", "cancel": "cancelled"}[decision]
-        record_activity(
-            request,
-            category=ActivityLog.Category.SUBSCRIPTION,
-            action=f"subscription.{action_past_tense}",
-            description=f"{request.user.full_name} {action_past_tense} {subscription.user.full_name}'s {subscription.package.name} request.",
-            target=subscription,
-        )
-        return Response(SubscriptionSerializer(subscription, context={"request": request}).data)
 
 
 class OwnerRecentWinViewSet(OwnerAuditMixin, viewsets.ModelViewSet):

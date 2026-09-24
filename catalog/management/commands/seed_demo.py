@@ -22,26 +22,24 @@ class Command(BaseCommand):
             owner.save()
 
         packages = [
-            ("Daily Edge", "daily-edge", "Accumulator", 10000, 1, 78, 4, "BK-DAY-78", True),
-            ("Weekend Board", "weekend-board", "Weekend combo", 35000, 7, 82, 20, "BK-WKD-82", False),
-            ("Season Desk", "season-desk", "VIP accumulator", 90000, 30, 86, 28, "BK-VIP-86", False),
+            ("Daily Edge", "daily-edge", "Accumulator", 10000, 78, 4, "BK-DAY-78", True),
+            ("Weekend Board", "weekend-board", "Weekend combo", 35000, 82, 20, "BK-WKD-82", False),
+            ("Season Desk", "season-desk", "VIP accumulator", 90000, 86, 28, "BK-VIP-86", False),
         ]
         package_objects = []
         now = timezone.now()
-        for order, (name, slug, package_type, price, duration, probability, starts_in, code, featured) in enumerate(packages):
+        for order, (name, slug, package_type, price, probability, closes_in, code, featured) in enumerate(packages):
             package, _ = Package.objects.update_or_create(
                 slug=slug,
                 defaults={
                     "name": name,
                     "package_type": package_type,
                     "price": price,
-                    "duration_days": duration,
                     "win_probability": probability,
-                    "commences_at": now + timedelta(hours=starts_in),
+                    "closes_at": now + timedelta(hours=closes_in),
                     "betslip_link": "https://example.com/betslip/" + slug,
                     "code": code,
                     "is_featured": featured,
-                    "is_active": True,
                     "display_order": order,
                 },
             )

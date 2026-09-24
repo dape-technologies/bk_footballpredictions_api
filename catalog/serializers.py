@@ -1,8 +1,9 @@
-from django.utils import timezone
+import re
+
 from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
-from .models import Package, Payment, Prediction, RecentWin, Subscription, Testimonial
+from .models import Package, Payment, Prediction, Purchase, RecentWin, Testimonial
 
 
 def media_url(request, field):
@@ -10,6 +11,15 @@ def media_url(request, field):
         return ""
     url = field.url
     return request.build_absolute_uri(url) if request else url
+
+
+def normalize_ugandan_msisdn(value):
+    raw = re.sub(r"\D", "", str(value or ""))
+    if raw.startswith("0") and len(raw) == 10:
+        raw = f"256{raw[1:]}"
+    if not raw.startswith("256") or len(raw) != 12:
+        raise serializers.ValidationError("Enter a valid Ugandan mobile-money number.")
+    return f"+{raw}"
 
 
 class PublicPackageSerializer(serializers.ModelSerializer):
@@ -20,7 +30,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
         model = Package
         fields = [
             "id", "name", "slug", "package_type", "price", "currency",
-            "win_probability", "commences_at", "image_url", "is_open",
+            "win_probability", "closes_at", "image_url", "is_open",
         ]
 
     def get_image_url(self, obj):
@@ -35,9 +45,8 @@ class PackageSerializer(serializers.ModelSerializer):
         model = Package
         fields = [
             "id", "name", "slug", "package_type", "description", "price", "currency",
-            "win_probability", "commences_at", "betslip_link", "code",
-            "duration_days", "access_label", "benefits", "image", "image_url",
-            "is_active", "is_featured", "display_order", "request_deadline",
+            "win_probability", "closes_at", "betslip_link", "code", "access_label",
+            "benefits", "image", "image_url", "is_featured", "display_order",
             "is_open", "created_at", "updated_at",
         ]
         extra_kwargs = {
@@ -45,90 +54,11 @@ class PackageSerializer(serializers.ModelSerializer):
             "package_type": {"required": True},
             "betslip_link": {"required": True, "allow_blank": False},
             "code": {"required": True, "allow_blank": False},
-            "commences_at": {"required": True, "allow_null": False},
+            "closes_at": {"required": True, "allow_null": False},
         }
 
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
-
-
-class SubscriptionSerializer(serializers.ModelSerializer):
-    package = PublicPackageSerializer(read_only=True)
-    user = UserSerializer(read_only=True)
-    approved_by_name = serializers.CharField(source="approved_by.full_name", read_only=True)
-    grants_access = serializers.ReadOnlyField()
-    betslip_link = serializers.SerializerMethodField()
-    code = serializers.SerializerMethodField()
-    payment_status = serializers.SerializerMethodField()
-    payment_reference = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Subscription
-        fields = [
-            "id", "user", "package", "status", "price_snapshot", "activation_source",
-            "requested_at", "approved_at", "starts_at", "expires_at", "approved_by_name",
-            "owner_note", "customer_message", "grants_access", "betslip_link", "code",
-            "payment_status", "payment_reference", "updated_at",
-        ]
-        read_only_fields = fields
-
-    def _can_view_slip(self, obj):
-        request = self.context.get("request")
-        return obj.grants_access or bool(
-            request
-            and request.user.is_authenticated
-            and request.user.is_product_owner
-        )
-
-    def get_betslip_link(self, obj):
-        return obj.package.betslip_link if self._can_view_slip(obj) else ""
-
-    def get_code(self, obj):
-        return obj.package.code if self._can_view_slip(obj) else ""
-
-    def get_payment_status(self, obj):
-        payment = getattr(obj, "payment", None)
-        return payment.status if payment else ""
-
-    def get_payment_reference(self, obj):
-        payment = getattr(obj, "payment", None)
-        return payment.reference if payment else ""
-
-
-class SubscriptionRequestSerializer(serializers.Serializer):
-    package_id = serializers.PrimaryKeyRelatedField(
-        source="package",
-        queryset=Package.objects.filter(is_active=True),
-    )
-
-    def validate_package_id(self, package):
-        if not package.is_open:
-            raise serializers.ValidationError("This package is not accepting requests.")
-        return package
-
-    def create(self, validated_data):
-        user = self.context["request"].user
-        package = validated_data["package"]
-        existing = Subscription.objects.filter(
-            user=user,
-            package=package,
-            status__in=[Subscription.Status.PENDING, Subscription.Status.ACTIVE],
-        ).first()
-        if existing:
-            raise serializers.ValidationError({"package_id": "You already have a pending or active request for this package."})
-        subscription = Subscription.objects.create(
-            user=user,
-            package=package,
-            price_snapshot=package.price,
-        )
-        Payment.objects.create(
-            subscription=subscription,
-            user=user,
-            package=package,
-            amount=package.price,
-            currency=package.currency,
-        )
-        return subscription
 
 
 class PaymentSerializer(serializers.ModelSerializer):
@@ -138,10 +68,76 @@ class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
         fields = [
-            "id", "reference", "user", "package", "amount", "currency",
-            "status", "provider", "paid_at", "created_at", "updated_at",
+            "id", "reference", "internal_reference", "user", "package", "amount",
+            "currency", "status", "provider", "payer_msisdn", "provider_message",
+            "paid_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+class PurchaseSerializer(serializers.ModelSerializer):
+    package = PublicPackageSerializer(read_only=True)
+    user = UserSerializer(read_only=True)
+    is_paid = serializers.ReadOnlyField()
+    status = serializers.ReadOnlyField()
+    code = serializers.SerializerMethodField()
+    betslip_link = serializers.SerializerMethodField()
+    latest_payment = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Purchase
+        fields = [
+            "id", "user", "package", "price_snapshot", "currency_snapshot",
+            "initiated_at", "paid_at", "updated_at", "is_paid", "status", "code",
+            "betslip_link", "latest_payment",
+        ]
+        read_only_fields = fields
+
+    def _can_view_secret(self, obj):
+        request = self.context.get("request")
+        return obj.is_paid or bool(
+            request and request.user.is_authenticated and request.user.is_product_owner
+        )
+
+    def get_code(self, obj):
+        return obj.code_snapshot if self._can_view_secret(obj) else ""
+
+    def get_betslip_link(self, obj):
+        return obj.link_snapshot if self._can_view_secret(obj) else ""
+
+    def get_latest_payment(self, obj):
+        payments = list(obj.payments.all())
+        payment = max(payments, key=lambda item: (item.created_at, item.id)) if payments else None
+        return PaymentSerializer(payment, context=self.context).data if payment else None
+
+
+class PurchaseCreateSerializer(serializers.Serializer):
+    package_id = serializers.PrimaryKeyRelatedField(
+        source="package",
+        queryset=Package.objects.filter(deleted_at__isnull=True),
+    )
+
+    def validate_package_id(self, package):
+        if not package.is_open:
+            raise serializers.ValidationError("This package is closed and cannot be purchased.")
+        return package
+
+    def create(self, validated_data):
+        package = validated_data["package"]
+        purchase, created = Purchase.objects.get_or_create(
+            user=self.context["request"].user,
+            package=package,
+            defaults={"price_snapshot": package.price, "currency_snapshot": package.currency},
+        )
+        self.was_created = created
+        return purchase
+
+
+class PaymentAttemptSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=20)
+
+    def validate_phone(self, value):
+        return normalize_ugandan_msisdn(value)
 
 
 class PredictionSerializer(serializers.ModelSerializer):
@@ -168,12 +164,7 @@ class PredictionSerializer(serializers.ModelSerializer):
             return False
         if request.user.is_staff:
             return True
-        return Subscription.objects.filter(
-            user=request.user,
-            package=obj.package,
-            status=Subscription.Status.ACTIVE,
-            expires_at__gt=timezone.now(),
-        ).exists()
+        return Purchase.objects.filter(user=request.user, package=obj.package, paid_at__isnull=False).exists()
 
     def get_locked(self, obj):
         return not self._can_view(obj)
