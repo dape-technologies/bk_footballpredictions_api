@@ -32,6 +32,8 @@ Premium response fields are removed by the API unless the requester owns a verif
 
 Copy the values from `.env.example` into the deployment environment. Configure the exact HTTPS value of `RELWORX_WEBHOOK_URL` as the Request Payment Webhook in the matching Relworx business account. A browser response never unlocks a package; only a valid signed webhook can complete a purchase.
 
+On cPanel, add these values to the Django application's **Environment variables** section under **Setup Python App**, then restart the application. Do not upload a populated `.env` file to `public_html` or commit secrets to Git. `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CSRF_TRUSTED_ORIGINS` must also be configured before setting `DJANGO_DEBUG=false`.
+
 Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
 
 ## Accounts and access
