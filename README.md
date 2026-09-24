@@ -33,7 +33,7 @@ Premium response fields are removed by the API unless the requester owns an acti
 Pull requests into `main` run the Django checks and tests. After a pull request
 is merged, the resulting push to `main` deploys a staged release to the
 configured Namecheap cPanel application through GitHub Actions. The complete
-cPanel, PostgreSQL, SSH-key, and GitHub environment setup is documented in the
+cPanel, MariaDB, SSH-key, and GitHub environment setup is documented in the
 web repository's `DEPLOYMENT.md`.
 
 ## Accounts and access
