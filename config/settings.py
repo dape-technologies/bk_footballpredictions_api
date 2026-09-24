@@ -99,3 +99,14 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.BrowsableAPIRenderer",
     ],
 }
+
+RELWORX_API_KEY = os.getenv("RELWORX_API_KEY", "")
+RELWORX_ACCOUNT_NO = os.getenv("RELWORX_ACCOUNT_NO", "")
+RELWORX_WEBHOOK_SIGNING_KEY = os.getenv("RELWORX_WEBHOOK_SIGNING_KEY", "")
+RELWORX_API_BASE_URL = os.getenv("RELWORX_API_BASE_URL", "https://payments.relworx.com")
+RELWORX_WEBHOOK_URL = os.getenv(
+    "RELWORX_WEBHOOK_URL",
+    "http://localhost:8000/api/v1/payments/relworx/webhook/",
+)
+RELWORX_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("RELWORX_WEBHOOK_TOLERANCE_SECONDS", "300"))
+RELWORX_REQUEST_TIMEOUT_SECONDS = int(os.getenv("RELWORX_REQUEST_TIMEOUT_SECONDS", "15"))
