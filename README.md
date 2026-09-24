@@ -30,10 +30,11 @@ Premium response fields are removed by the API unless the requester owns an acti
 
 ## Deployment
 
-Pushes to the `marcdemo` branch run the Django checks and tests, then deploy a
-staged release to the configured Namecheap cPanel application through GitHub
-Actions. The complete cPanel, PostgreSQL, SSH-key, and GitHub environment setup
-is documented in the web repository's `DEPLOYMENT.md`.
+Pull requests into `main` run the Django checks and tests. After a pull request
+is merged, the resulting push to `main` deploys a staged release to the
+configured Namecheap cPanel application through GitHub Actions. The complete
+cPanel, PostgreSQL, SSH-key, and GitHub environment setup is documented in the
+web repository's `DEPLOYMENT.md`.
 
 ## Accounts and access
 

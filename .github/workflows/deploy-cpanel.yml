@@ -2,7 +2,9 @@ name: Test and deploy API to cPanel
 
 on:
   push:
-    branches: [marcdemo]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -35,6 +37,7 @@ jobs:
 
   deploy:
     needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
     env:
