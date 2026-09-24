@@ -1,4 +1,3 @@
-from datetime import timedelta
 from uuid import uuid4
 
 from django.conf import settings
@@ -18,17 +17,14 @@ class Package(models.Model):
         default=70,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
     )
-    commences_at = models.DateTimeField(blank=True, null=True)
-    betslip_link = models.URLField(max_length=500, blank=True)
-    code = models.CharField(max_length=120, blank=True)
-    duration_days = models.PositiveIntegerField(default=1)
+    closes_at = models.DateTimeField()
+    betslip_link = models.URLField(max_length=500)
+    code = models.CharField(max_length=120)
     access_label = models.CharField(max_length=80, default="Premium predictions")
     benefits = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to="packages/", blank=True, null=True)
-    is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
-    request_deadline = models.DateTimeField(blank=True, null=True)
     deleted_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -38,58 +34,52 @@ class Package(models.Model):
 
     @property
     def is_open(self):
-        return self.is_active and (not self.request_deadline or self.request_deadline > timezone.now())
+        return self.deleted_at is None and self.closes_at > timezone.now()
 
     def __str__(self):
         return self.name
 
 
-class Subscription(models.Model):
-    class Status(models.TextChoices):
-        PENDING = "pending", "Pending"
-        ACTIVE = "active", "Active"
-        EXPIRED = "expired", "Expired"
-        REJECTED = "rejected", "Rejected"
-        CANCELLED = "cancelled", "Cancelled"
-
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="subscriptions")
-    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="subscriptions")
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+class Purchase(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="purchases")
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="purchases")
     price_snapshot = models.DecimalField(max_digits=12, decimal_places=0)
-    activation_source = models.CharField(max_length=20, default="manual")
-    requested_at = models.DateTimeField(auto_now_add=True)
-    approved_at = models.DateTimeField(blank=True, null=True)
-    starts_at = models.DateTimeField(blank=True, null=True)
-    expires_at = models.DateTimeField(blank=True, null=True)
-    approved_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        blank=True,
-        null=True,
-        related_name="approved_subscriptions",
-    )
-    owner_note = models.TextField(blank=True)
-    customer_message = models.CharField(max_length=240, blank=True)
+    currency_snapshot = models.CharField(max_length=8, default="UGX")
+    code_snapshot = models.CharField(max_length=120, blank=True)
+    link_snapshot = models.URLField(max_length=500, blank=True)
+    initiated_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["-requested_at"]
-
-    def activate(self, owner):
-        now = timezone.now()
-        self.status = self.Status.ACTIVE
-        self.approved_by = owner
-        self.approved_at = now
-        self.starts_at = now
-        self.expires_at = now + timedelta(days=self.package.duration_days)
-        self.save()
+        ordering = ["-initiated_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["user", "package"], name="unique_user_package_purchase"),
+        ]
 
     @property
-    def grants_access(self):
-        return self.status == self.Status.ACTIVE and self.expires_at and self.expires_at > timezone.now()
+    def is_paid(self):
+        return self.paid_at is not None
+
+    @property
+    def status(self):
+        if self.is_paid:
+            return Payment.Status.PAID
+        cached = getattr(self, "_prefetched_objects_cache", {}).get("payments")
+        latest = max(cached, key=lambda item: (item.created_at, item.id)) if cached else self.payments.order_by("-created_at", "-id").first()
+        return latest.status if latest else "unpaid"
+
+    def complete(self, paid_at=None):
+        if self.is_paid:
+            return False
+        self.paid_at = paid_at or timezone.now()
+        self.code_snapshot = self.package.code
+        self.link_snapshot = self.package.betslip_link
+        self.save(update_fields=["paid_at", "code_snapshot", "link_snapshot", "updated_at"])
+        return True
 
     def __str__(self):
-        return f"{self.user} · {self.package} · {self.status}"
+        return f"{self.user} · {self.package}"
 
 
 def payment_reference():
@@ -101,17 +91,20 @@ class Payment(models.Model):
         PENDING = "pending", "Pending"
         PAID = "paid", "Paid"
         FAILED = "failed", "Failed"
-        REFUNDED = "refunded", "Refunded"
         CANCELLED = "cancelled", "Cancelled"
 
-    subscription = models.OneToOneField(Subscription, on_delete=models.PROTECT, related_name="payment")
+    purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="payments")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="payments")
     package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments")
     amount = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
     currency = models.CharField(max_length=8, default="UGX")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     reference = models.CharField(max_length=24, unique=True, default=payment_reference, editable=False)
-    provider = models.CharField(max_length=40, default="manual")
+    internal_reference = models.CharField(max_length=80, blank=True, db_index=True)
+    provider = models.CharField(max_length=40, default="relworx")
+    payer_msisdn = models.CharField(max_length=20)
+    provider_message = models.CharField(max_length=240, blank=True)
+    provider_payload = models.JSONField(default=dict, blank=True)
     paid_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

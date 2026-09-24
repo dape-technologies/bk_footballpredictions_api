@@ -1,6 +1,6 @@
 # BK Football Predictions — API
 
-Django REST Framework API for customer accounts, packages, manual subscriptions, gated predictions, results, testimonials, and owner operations.
+Django REST Framework API for customer accounts, time-limited package sales, permanent purchases, Relworx mobile-money payments, gated predictions, results, testimonials, and owner operations.
 
 ## Run locally
 
@@ -26,7 +26,13 @@ Change production credentials and never run the demo seed in production.
 .\.venv\Scripts\python.exe manage.py test
 ```
 
-Premium response fields are removed by the API unless the requester owns an active, unexpired subscription to the prediction's package.
+Premium response fields are removed by the API unless the requester owns a verified paid purchase for the prediction's package. Package codes and links are snapshotted when Relworx confirms payment and remain available permanently.
+
+## Relworx configuration
+
+Copy the values from `.env.example` into the deployment environment. Configure the exact HTTPS value of `RELWORX_WEBHOOK_URL` as the Request Payment Webhook in the matching Relworx business account. A browser response never unlocks a package; only a valid signed webhook can complete a purchase.
+
+Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
 
 ## Accounts and access
 
@@ -34,7 +40,7 @@ Registration accepts `first_name`, `surname`, `date_of_birth`, `phone`, `passwor
 
 The current privileged role is **Product Owner**. Superusers have this role automatically, and non-superusers can be assigned to the Django `Product Owner` group. Other staff groups can be added later without receiving owner-control-room access by default.
 
-The owner activity API is available at `GET /api/v1/owner/activities/`. It records authentication events and important account, subscription, content, and administrative changes. The same read-only audit trail is available in Django Admin.
+The owner activity API is available at `GET /api/v1/owner/activities/`. It records authentication events and important account, purchase, payment, content, and administrative changes. The same read-only audit trail is available in Django Admin.
 
 For local development, Django trusts `http://localhost:5173` and
 `http://127.0.0.1:5173` as CSRF origins. In another environment, set
