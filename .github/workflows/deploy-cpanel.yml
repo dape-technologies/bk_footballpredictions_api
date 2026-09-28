@@ -101,6 +101,45 @@ jobs:
             -e "ssh -i ~/.ssh/cpanel_deploy -p $SSH_PORT" \
             ./ "$SSH_USER@$SSH_HOST:$APP_ROOT/$STAGE_NAME/"
 
+      - name: Stage production Relworx configuration
+        env:
+          SSH_HOST: ${{ secrets.CPANEL_HOST }}
+          SSH_USER: ${{ secrets.CPANEL_USERNAME }}
+          RELWORX_API_KEY: ${{ secrets.RELWORX_API_KEY }}
+          RELWORX_ACCOUNT_NO: ${{ secrets.RELWORX_ACCOUNT_NO }}
+          RELWORX_WEBHOOK_SIGNING_KEY: ${{ secrets.RELWORX_WEBHOOK_SIGNING_KEY }}
+          RELWORX_API_BASE_URL: ${{ vars.RELWORX_API_BASE_URL || 'https://payments.relworx.com' }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          test -n "$RELWORX_API_KEY"
+          test -n "$RELWORX_ACCOUNT_NO"
+          test -n "$RELWORX_WEBHOOK_SIGNING_KEY"
+          test -n "$RELWORX_API_BASE_URL"
+          test -n "$PRODUCTION_URL"
+
+          for value in "$RELWORX_API_KEY" "$RELWORX_ACCOUNT_NO" "$RELWORX_WEBHOOK_SIGNING_KEY" "$RELWORX_API_BASE_URL" "$PRODUCTION_URL"; do
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "Relworx configuration values must not contain newlines." >&2
+              exit 1
+            fi
+          done
+
+          secrets_file="$RUNNER_TEMP/relworx-production.env"
+          trap 'rm -f -- "$secrets_file"' EXIT
+          umask 077
+          {
+            printf 'RELWORX_API_KEY=%s\n' "$RELWORX_API_KEY"
+            printf 'RELWORX_ACCOUNT_NO=%s\n' "$RELWORX_ACCOUNT_NO"
+            printf 'RELWORX_WEBHOOK_SIGNING_KEY=%s\n' "$RELWORX_WEBHOOK_SIGNING_KEY"
+            printf 'RELWORX_API_BASE_URL=%s\n' "${RELWORX_API_BASE_URL%/}"
+            printf 'RELWORX_WEBHOOK_URL=%s/api/v1/payments/relworx/webhook/\n' "${PRODUCTION_URL%/}"
+          } > "$secrets_file"
+
+          scp -i ~/.ssh/cpanel_deploy -P "$SSH_PORT" "$secrets_file" \
+            "$SSH_USER@$SSH_HOST:$APP_ROOT/$STAGE_NAME/.production-env"
+          ssh -i ~/.ssh/cpanel_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "chmod 600 '$APP_ROOT/$STAGE_NAME/.production-env'"
+
       - name: Validate and publish API release
         env:
           SSH_HOST: ${{ secrets.CPANEL_HOST }}
