@@ -83,8 +83,8 @@ awk -F= '
     }
   }
   END {
-    for (index = 1; index <= count; index++) {
-      key = order[index]
+    for (i = 1; i <= count; i++) {
+      key = order[i]
       if (!written[key]) {
         print replacement[key]
       }
