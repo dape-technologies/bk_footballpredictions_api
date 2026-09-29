@@ -30,15 +30,15 @@ test -f "$activate"
 test -f "$production_env"
 test -f "$production_patch"
 
-expected_pattern='^(RELWORX_API_KEY|RELWORX_ACCOUNT_NO|RELWORX_WEBHOOK_SIGNING_KEY|RELWORX_API_BASE_URL|RELWORX_WEBHOOK_URL)=.+$'
-if [[ $(wc -l < "$production_patch") -ne 5 ]] || grep -Eqv "$expected_pattern" "$production_patch"; then
-  echo "The staged Relworx configuration is incomplete or invalid." >&2
+expected_pattern='^(RELWORX_API_KEY|RELWORX_ACCOUNT_NO|RELWORX_WEBHOOK_SIGNING_KEY|RELWORX_API_BASE_URL|RELWORX_WEBHOOK_URL|ADMIN_LOGIN_USERNAME|ADMIN_SEED_PHONE|ADMIN_SEED_PASSWORD)=.+$'
+if [[ $(wc -l < "$production_patch") -ne 8 ]] || grep -Eqv "$expected_pattern" "$production_patch"; then
+  echo "The staged production configuration is incomplete or invalid." >&2
   exit 1
 fi
 
-for key in RELWORX_API_KEY RELWORX_ACCOUNT_NO RELWORX_WEBHOOK_SIGNING_KEY RELWORX_API_BASE_URL RELWORX_WEBHOOK_URL; do
+for key in RELWORX_API_KEY RELWORX_ACCOUNT_NO RELWORX_WEBHOOK_SIGNING_KEY RELWORX_API_BASE_URL RELWORX_WEBHOOK_URL ADMIN_LOGIN_USERNAME ADMIN_SEED_PHONE ADMIN_SEED_PASSWORD; do
   if [[ $(grep -c "^$key=" "$production_patch") -ne 1 ]]; then
-    echo "The staged Relworx configuration has a missing or duplicate key." >&2
+    echo "The staged production configuration has a missing or duplicate key." >&2
     exit 1
   fi
 done
@@ -96,6 +96,7 @@ mv -- "$env_tmp" "$production_env"
 env_tmp=""
 
 cd "$app_root"
+python manage.py ensure_admin
 python manage.py collectstatic --noinput --clear
 mkdir -p tmp
 touch tmp/restart.txt
