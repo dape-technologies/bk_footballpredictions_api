@@ -1,8 +1,10 @@
 from datetime import date, timedelta
 
+from django.contrib.auth import authenticate
 from django.core.cache import cache
+from django.core.management import call_command
+from django.test import Client, override_settings
 from django.urls import reverse
-from django.test import Client
 from rest_framework.test import APITestCase
 
 from .models import User
@@ -204,3 +206,47 @@ class AuthenticationTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
         self.assertIn("sessionid", self.client.cookies)
+
+    @override_settings(
+        ADMIN_LOGIN_USERNAME="admin",
+        ADMIN_SEED_PHONE="0700000000",
+        ADMIN_SEED_PASSWORD="bkpassword",
+    )
+    def test_seeded_admin_alias_is_idempotent_and_can_log_in(self):
+        call_command("ensure_admin", verbosity=0)
+        call_command("ensure_admin", verbosity=0)
+
+        owner = User.objects.get(phone="0700000000")
+        self.assertEqual(User.objects.filter(phone="0700000000").count(), 1)
+        self.assertTrue(owner.is_staff)
+        self.assertTrue(owner.is_superuser)
+        self.assertTrue(owner.check_password("bkpassword"))
+        self.assertEqual(authenticate(username="admin", password="bkpassword"), owner)
+
+        response = self.client.post(
+            reverse("admin-login"),
+            {"phone": "admin", "password": "bkpassword"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_owner"])
+
+    @override_settings(
+        ADMIN_LOGIN_USERNAME="admin",
+        ADMIN_SEED_PHONE="0700000000",
+        ADMIN_SEED_PASSWORD="bkpassword",
+    )
+    def test_seeded_admin_alias_can_use_django_admin(self):
+        call_command("ensure_admin", verbosity=0)
+
+        response = self.client.post(
+            reverse("admin:login"),
+            {"username": "admin", "password": "bkpassword", "next": reverse("admin:index")},
+        )
+
+        self.assertRedirects(
+            response,
+            reverse("admin:index"),
+            fetch_redirect_response=False,
+        )

@@ -117,6 +117,11 @@ STORAGES = {
 }
 
 AUTH_USER_MODEL = "accounts.User"
+AUTHENTICATION_BACKENDS = ["accounts.backends.PhoneOrAdminAliasBackend"]
+
+ADMIN_LOGIN_USERNAME = os.getenv("ADMIN_LOGIN_USERNAME", "").strip()
+ADMIN_SEED_PHONE = os.getenv("ADMIN_SEED_PHONE", "").strip()
+ADMIN_SEED_PASSWORD = os.getenv("ADMIN_SEED_PASSWORD", "")
 
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"

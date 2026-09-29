@@ -101,7 +101,7 @@ jobs:
             -e "ssh -i ~/.ssh/cpanel_deploy -p $SSH_PORT" \
             ./ "$SSH_USER@$SSH_HOST:$APP_ROOT/$STAGE_NAME/"
 
-      - name: Stage production Relworx configuration
+      - name: Stage production application configuration
         env:
           SSH_HOST: ${{ secrets.CPANEL_HOST }}
           SSH_USER: ${{ secrets.CPANEL_USERNAME }}
@@ -110,14 +110,20 @@ jobs:
           RELWORX_WEBHOOK_SIGNING_KEY: ${{ secrets.RELWORX_WEBHOOK_SIGNING_KEY }}
           RELWORX_API_BASE_URL: ${{ vars.RELWORX_API_BASE_URL || 'https://payments.relworx.com' }}
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+          ADMIN_LOGIN_USERNAME: ${{ vars.ADMIN_LOGIN_USERNAME || 'admin' }}
+          ADMIN_SEED_PHONE: ${{ vars.ADMIN_SEED_PHONE || '0700000000' }}
+          ADMIN_SEED_PASSWORD: ${{ secrets.ADMIN_SEED_PASSWORD }}
         run: |
           test -n "$RELWORX_API_KEY"
           test -n "$RELWORX_ACCOUNT_NO"
           test -n "$RELWORX_WEBHOOK_SIGNING_KEY"
           test -n "$RELWORX_API_BASE_URL"
           test -n "$PRODUCTION_URL"
+          test -n "$ADMIN_LOGIN_USERNAME"
+          test -n "$ADMIN_SEED_PHONE"
+          test -n "$ADMIN_SEED_PASSWORD"
 
-          for value in "$RELWORX_API_KEY" "$RELWORX_ACCOUNT_NO" "$RELWORX_WEBHOOK_SIGNING_KEY" "$RELWORX_API_BASE_URL" "$PRODUCTION_URL"; do
+          for value in "$RELWORX_API_KEY" "$RELWORX_ACCOUNT_NO" "$RELWORX_WEBHOOK_SIGNING_KEY" "$RELWORX_API_BASE_URL" "$PRODUCTION_URL" "$ADMIN_LOGIN_USERNAME" "$ADMIN_SEED_PHONE" "$ADMIN_SEED_PASSWORD"; do
             if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
               echo "Relworx configuration values must not contain newlines." >&2
               exit 1
@@ -133,6 +139,9 @@ jobs:
             printf 'RELWORX_WEBHOOK_SIGNING_KEY=%s\n' "$RELWORX_WEBHOOK_SIGNING_KEY"
             printf 'RELWORX_API_BASE_URL=%s\n' "${RELWORX_API_BASE_URL%/}"
             printf 'RELWORX_WEBHOOK_URL=%s/api/v1/payments/relworx/webhook/\n' "${PRODUCTION_URL%/}"
+            printf 'ADMIN_LOGIN_USERNAME=%s\n' "$ADMIN_LOGIN_USERNAME"
+            printf 'ADMIN_SEED_PHONE=%s\n' "$ADMIN_SEED_PHONE"
+            printf 'ADMIN_SEED_PASSWORD=%s\n' "$ADMIN_SEED_PASSWORD"
           } > "$secrets_file"
 
           scp -i ~/.ssh/cpanel_deploy -P "$SSH_PORT" "$secrets_file" \
