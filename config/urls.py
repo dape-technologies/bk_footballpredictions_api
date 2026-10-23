@@ -9,7 +9,7 @@ from config.views import spa_index
 
 urlpatterns = [
     path("api/health/", lambda request: JsonResponse({"status": "ok"})),
-    path("admin/", admin.site.urls),
+    path("django-admin/", admin.site.urls),
     path("api/", include("api.urls")),
     path("api/v1/", include("accounts.urls")),
     path("api/v1/", include("catalog.urls")),
@@ -23,5 +23,5 @@ elif settings.SERVE_MEDIA_FILES:
     ]
 
 urlpatterns += [
-    re_path(r"^(?!api(?:/|$)|admin(?:/|$)|media(?:/|$)|static(?:/|$)).*$", spa_index),
+    re_path(r"^(?!api(?:/|$)|django-admin(?:/|$)|media(?:/|$)|static(?:/|$)).*$", spa_index),
 ]

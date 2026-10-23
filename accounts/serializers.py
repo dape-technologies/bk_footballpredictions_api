@@ -90,8 +90,7 @@ class LoginSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        phone = User.normalize_phone(attrs["phone"])
-        user = authenticate(phone=phone, password=attrs["password"])
+        user = authenticate(username=attrs["phone"], password=attrs["password"])
         if not user:
             raise serializers.ValidationError("The phone number or password is incorrect.")
         if user.is_blocked:
