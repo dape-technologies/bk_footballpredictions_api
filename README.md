@@ -76,7 +76,7 @@ Registration accepts `first_name`, `surname`, `date_of_birth`, `phone`, `passwor
 
 The current privileged role is **Product Owner**. Superusers have this role automatically, and non-superusers can be assigned to the Django `Product Owner` group. Other staff groups can be added later without receiving owner-control-room access by default.
 
-The deployment runs `python manage.py ensure_admin` after migrations. Configure `ADMIN_LOGIN_USERNAME` and `ADMIN_SEED_PHONE` as GitHub `production` environment variables and `ADMIN_SEED_PASSWORD` as an environment secret. The username is an alias backed by the seeded phone-based superuser, so it works in both the product-owner login and Django Admin. Never commit the production password.
+The deployment runs `python manage.py ensure_admin` after migrations. Configure `ADMIN_LOGIN_USERNAME` and `ADMIN_SEED_PHONE` as GitHub `production` environment variables and `ADMIN_SEED_PASSWORD` as an environment secret. The username is an alias backed by the seeded phone-based superuser, so it works in both the product-owner login and Django Admin. Existing administrator passwords are preserved during ordinary deployments; use `python manage.py ensure_admin --reset-password` only for an intentional reset to the configured secret. Never commit the production password.
 
 The owner activity API is available at `GET /api/v1/owner/activities/`. It records authentication events and important account, purchase, payment, content, and administrative changes. The same read-only audit trail is available in Django Admin.
 

@@ -214,23 +214,47 @@ class AuthenticationTests(APITestCase):
     )
     def test_seeded_admin_alias_is_idempotent_and_can_log_in(self):
         call_command("ensure_admin", verbosity=0)
+        owner = User.objects.get(phone="0700000000")
+        owner.set_password("owner-selected-password")
+        owner.save(update_fields=["password"])
         call_command("ensure_admin", verbosity=0)
 
         owner = User.objects.get(phone="0700000000")
         self.assertEqual(User.objects.filter(phone="0700000000").count(), 1)
         self.assertTrue(owner.is_staff)
         self.assertTrue(owner.is_superuser)
-        self.assertTrue(owner.check_password("bkpassword"))
-        self.assertEqual(authenticate(username="admin", password="bkpassword"), owner)
+        self.assertTrue(owner.check_password("owner-selected-password"))
+        self.assertFalse(owner.check_password("bkpassword"))
+        self.assertEqual(authenticate(username="admin", password="owner-selected-password"), owner)
 
         response = self.client.post(
             reverse("admin-login"),
-            {"phone": "admin", "password": "bkpassword"},
+            {"phone": "admin", "password": "owner-selected-password"},
             format="json",
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
+
+    @override_settings(
+        ADMIN_LOGIN_USERNAME="admin",
+        ADMIN_SEED_PHONE="0700000000",
+        ADMIN_SEED_PASSWORD="replacement-password",
+    )
+    def test_seeded_admin_password_can_be_explicitly_reset(self):
+        owner = User.objects.create_superuser(
+            phone="0700000000",
+            first_name="System",
+            last_name="Administrator",
+            date_of_birth="1990-01-01",
+            password="owner-selected-password",
+        )
+
+        call_command("ensure_admin", reset_password=True, verbosity=0)
+
+        owner.refresh_from_db()
+        self.assertTrue(owner.check_password("replacement-password"))
+        self.assertFalse(owner.check_password("owner-selected-password"))
 
     @override_settings(
         ADMIN_LOGIN_USERNAME="admin",

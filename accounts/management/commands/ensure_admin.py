@@ -9,6 +9,13 @@ from accounts.models import User
 class Command(BaseCommand):
     help = "Create or refresh the configured seeded administrator account."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--reset-password",
+            action="store_true",
+            help="Reset an existing seeded administrator to ADMIN_SEED_PASSWORD.",
+        )
+
     def handle(self, *args, **options):
         alias = settings.ADMIN_LOGIN_USERNAME
         phone = User.normalize_phone(settings.ADMIN_SEED_PHONE)
@@ -40,8 +47,12 @@ class Command(BaseCommand):
         user.is_staff = True
         user.is_superuser = True
         user.is_blocked = False
-        user.set_password(password)
+        if created or options["reset_password"]:
+            user.set_password(password)
         user.save()
 
         action = "Created" if created else "Updated"
-        self.stdout.write(self.style.SUCCESS(f"{action} seeded administrator '{alias}'."))
+        password_action = " Password reset." if options["reset_password"] and not created else ""
+        self.stdout.write(
+            self.style.SUCCESS(f"{action} seeded administrator '{alias}'.{password_action}")
+        )
