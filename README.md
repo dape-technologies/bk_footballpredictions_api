@@ -32,6 +32,12 @@ Premium response fields are removed by the API unless the requester owns a verif
 
 Copy the values from `.env.example` into the deployment environment. Configure the exact HTTPS value of `RELWORX_WEBHOOK_URL` as the Request Payment Webhook in the matching Relworx business account. A browser response never unlocks a package; only a valid signed webhook can complete a purchase.
 
+For automated production deployments, add `RELWORX_API_KEY`, `RELWORX_ACCOUNT_NO`, and `RELWORX_WEBHOOK_SIGNING_KEY` as secrets in the API repository's GitHub `production` environment. Set `PRODUCTION_URL` there as an environment variable; the pipeline derives the exact webhook URL from it and atomically updates only the Relworx entries in the protected server `.env`.
+
+When GitHub manages these values, remove the corresponding `RELWORX_*` entries from cPanel's **Setup Python App** environment-variable list. Process-level cPanel values take precedence over the synchronized `.env`.
+
+For manual deployments, add the same values to the Django application's **Environment variables** section under **Setup Python App** or to the private application-root `.env`, then restart the application. Do not upload a populated `.env` file to `public_html` or commit secrets to Git. `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CSRF_TRUSTED_ORIGINS` must also be configured before setting `DJANGO_DEBUG=false`.
+
 Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
 
 Complete this production checklist in the Relworx dashboard:
@@ -59,6 +65,8 @@ web repository's `DEPLOYMENT.md`.
 Registration accepts `first_name`, `surname`, `date_of_birth`, `phone`, `password`, and `password_confirm`. The API rejects anyone who has not reached their eighteenth birthday. Phone numbers are normalized before the database-level uniqueness check, and both password fields must match. Login accepts only `phone` and `password`. Browser authentication uses an HTTP-only Django session with CSRF protection; passwords are stored with Django's password hasher and are never returned by the API.
 
 The current privileged role is **Product Owner**. Superusers have this role automatically, and non-superusers can be assigned to the Django `Product Owner` group. Other staff groups can be added later without receiving owner-control-room access by default.
+
+The deployment runs `python manage.py ensure_admin` after migrations. Configure `ADMIN_LOGIN_USERNAME` and `ADMIN_SEED_PHONE` as GitHub `production` environment variables and `ADMIN_SEED_PASSWORD` as an environment secret. The username is an alias backed by the seeded phone-based superuser, so it works in both the product-owner login and Django Admin. Never commit the production password.
 
 The owner activity API is available at `GET /api/v1/owner/activities/`. It records authentication events and important account, purchase, payment, content, and administrative changes. The same read-only audit trail is available in Django Admin.
 
