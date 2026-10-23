@@ -60,6 +60,19 @@ class PackageSerializer(serializers.ModelSerializer):
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
 
+    def validate(self, attrs):
+        currency = str(attrs.get("currency", getattr(self.instance, "currency", "UGX"))).upper()
+        price = attrs.get("price", getattr(self.instance, "price", None))
+        errors = {}
+        if currency != "UGX":
+            errors["currency"] = "Mobile-money checkout currently supports UGX packages only."
+        if price is not None and not 500 <= price <= 5000000:
+            errors["price"] = "Relworx accepts UGX payments from 500 to 5,000,000."
+        if errors:
+            raise serializers.ValidationError(errors)
+        attrs["currency"] = currency
+        return attrs
+
 
 class PaymentSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)

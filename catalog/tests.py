@@ -4,12 +4,70 @@ import time
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.contrib.auth.models import Group
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
 from .models import Package, Payment, Prediction, Purchase
+
+
+class OwnerRolePermissionTests(APITestCase):
+    owner_urls = [
+        "/api/v1/owner/dashboard/",
+        "/api/v1/owner/activities/",
+        "/api/v1/owner/packages/",
+        "/api/v1/owner/payments/",
+        "/api/v1/owner/predictions/",
+        "/api/v1/owner/recent-wins/",
+        "/api/v1/owner/testimonials/",
+        "/api/v1/owner/customers/",
+    ]
+
+    def setUp(self):
+        self.customer = User.objects.create_user(
+            phone="0703000001",
+            first_name="Regular",
+            last_name="Customer",
+            password="customer-pass-27",
+        )
+        self.staff = User.objects.create_user(
+            phone="0703000002",
+            first_name="Ordinary",
+            last_name="Staff",
+            password="staff-pass-27",
+            is_staff=True,
+        )
+        self.owner = User.objects.create_user(
+            phone="0703000003",
+            first_name="Product",
+            last_name="Owner",
+            password="owner-pass-27",
+            is_staff=True,
+        )
+        owner_group, _ = Group.objects.get_or_create(name="Product Owner")
+        self.owner.groups.add(owner_group)
+
+    def assert_owner_views_return(self, expected_status):
+        for url in self.owner_urls:
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, expected_status)
+
+    def test_anonymous_user_cannot_access_any_owner_view(self):
+        self.assert_owner_views_return(401)
+
+    def test_customer_cannot_access_any_owner_view(self):
+        self.client.force_login(self.customer)
+        self.assert_owner_views_return(403)
+
+    def test_staff_without_product_owner_role_cannot_access_any_owner_view(self):
+        self.client.force_login(self.staff)
+        self.assert_owner_views_return(403)
+
+    def test_product_owner_group_can_access_every_owner_view(self):
+        self.client.force_login(self.owner)
+        self.assert_owner_views_return(200)
 
 
 @override_settings(
@@ -126,6 +184,20 @@ class PurchaseFlowTests(APITestCase):
         response = self.client.post("/api/v1/me/purchases/", {"package_id": self.package.id}, format="json")
         self.assertEqual(response.status_code, 400)
 
+    def test_payment_rejects_package_outside_relworx_ugx_limits(self):
+        self.package.price = 100
+        self.package.save(update_fields=["price"])
+        purchase = self.create_purchase()
+
+        response = self.client.post(
+            f"/api/v1/me/purchases/{purchase.id}/payment-attempts/",
+            {"phone": "0773454899"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(purchase.payments.count(), 0)
+
     def test_pending_purchase_does_not_reveal_secrets(self):
         purchase = self.create_purchase()
         response = self.client.get(f"/api/v1/me/purchases/{purchase.id}/")
@@ -212,6 +284,54 @@ class PurchaseFlowTests(APITestCase):
         self.assertTrue(purchase.is_paid)
         self.assertEqual(payment.status, Payment.Status.PAID)
         self.assertEqual(purchase.code_snapshot, "BK-DAY-78")
+
+    @patch("catalog.views.check_mobile_money_payment")
+    def test_status_refresh_recovers_a_missed_success_webhook(self, mocked_check):
+        purchase, payment = self.start_payment()
+        mocked_check.return_value = {
+            "success": True,
+            "status": "success",
+            "message": "Request payment completed successfully.",
+            "customer_reference": payment.reference,
+            "internal_reference": payment.internal_reference,
+            "amount": 10000,
+            "currency": "UGX",
+            "provider": "MTN_UGANDA",
+            "completed_at": timezone.now().isoformat(),
+        }
+
+        response = self.client.post(f"/api/v1/me/payments/{payment.id}/refresh/", {}, format="json")
+
+        purchase.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payment.status, Payment.Status.PAID)
+        self.assertTrue(purchase.is_paid)
+
+    @patch("catalog.views.check_mobile_money_payment")
+    def test_status_refresh_keeps_provider_pending_payment_pending(self, mocked_check):
+        _, payment = self.start_payment()
+        mocked_check.return_value = {
+            "success": True,
+            "status": "pending",
+            "customer_reference": payment.reference,
+            "internal_reference": payment.internal_reference,
+        }
+
+        response = self.client.post(f"/api/v1/me/payments/{payment.id}/refresh/", {}, format="json")
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], Payment.Status.PENDING)
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+
+    def test_user_cannot_refresh_another_users_payment(self):
+        _, payment = self.start_payment()
+        self.client.force_login(self.other)
+
+        response = self.client.post(f"/api/v1/me/payments/{payment.id}/refresh/", {}, format="json")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_amount_currency_and_internal_reference_mismatches_never_unlock(self):
         cases = [

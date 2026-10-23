@@ -1,4 +1,5 @@
 import json
+from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -9,6 +10,34 @@ class RelworxError(Exception):
     def __init__(self, message, *, uncertain=False):
         super().__init__(message)
         self.uncertain = uncertain
+
+
+def _authenticated_request(url, *, data=None, method="GET"):
+    request = Request(
+        url,
+        data=json.dumps(data).encode("utf-8") if data is not None else None,
+        headers={
+            "Authorization": f"Bearer {settings.RELWORX_API_KEY}",
+            "Accept": "application/vnd.relworx.v2",
+            **({"Content-Type": "application/json"} if data is not None else {}),
+        },
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=settings.RELWORX_REQUEST_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        try:
+            error_payload = json.loads(error.read().decode("utf-8"))
+            detail = error_payload.get("message") if isinstance(error_payload, dict) else None
+        except (ValueError, AttributeError):
+            detail = None
+        raise RelworxError(detail or "The payment provider rejected this request.") from error
+    except (URLError, TimeoutError, ValueError) as error:
+        raise RelworxError(
+            "Relworx has not confirmed whether the request was received. Please check again shortly.",
+            uncertain=True,
+        ) from error
 
 
 def request_mobile_money_payment(payment):
@@ -24,31 +53,25 @@ def request_mobile_money_payment(payment):
         "amount": float(payment.amount),
         "description": f"{payment.package.name} betting package",
     }
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {settings.RELWORX_API_KEY}",
-            "Accept": "application/vnd.relworx.v2",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=settings.RELWORX_REQUEST_TIMEOUT_SECONDS) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        try:
-            detail = json.loads(error.read().decode("utf-8")).get("message")
-        except (ValueError, AttributeError):
-            detail = None
-        raise RelworxError(detail or "The payment provider rejected this request.") from error
-    except (URLError, TimeoutError, ValueError) as error:
-        raise RelworxError(
-            "Relworx has not confirmed whether the request was received. We will keep checking before allowing another attempt.",
-            uncertain=True,
-        ) from error
+    result = _authenticated_request(url, data=payload, method="POST")
 
     if not result.get("success") or not result.get("internal_reference"):
         raise RelworxError(result.get("message") or "The payment request could not be started.")
+    return result
+
+
+def check_mobile_money_payment(payment):
+    if not settings.RELWORX_API_KEY or not settings.RELWORX_ACCOUNT_NO:
+        raise RelworxError("Payments are temporarily unavailable.")
+    if not payment.internal_reference:
+        raise RelworxError("Relworx has not assigned this payment a reference yet.", uncertain=True)
+
+    query = urlencode({
+        "internal_reference": payment.internal_reference,
+        "account_no": settings.RELWORX_ACCOUNT_NO,
+    })
+    url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-request-status?{query}"
+    result = _authenticated_request(url)
+    if not result.get("success"):
+        raise RelworxError(result.get("message") or "The payment status could not be checked.")
     return result

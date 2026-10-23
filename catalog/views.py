@@ -20,7 +20,7 @@ from accounts.permissions import IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
 from .models import Package, Payment, Prediction, Purchase, RecentWin, Testimonial
-from .relworx import RelworxError, request_mobile_money_payment
+from .relworx import RelworxError, check_mobile_money_payment, request_mobile_money_payment
 from .serializers import (
     PackageSerializer,
     PaymentAttemptSerializer,
@@ -147,6 +147,10 @@ class PaymentAttemptView(APIView):
                 return Response({"detail": "This package has already been purchased."}, status=status.HTTP_409_CONFLICT)
             if not purchase.package.is_open:
                 return Response({"detail": "This package is closed and cannot be purchased."}, status=status.HTTP_409_CONFLICT)
+            if purchase.currency_snapshot.upper() != "UGX":
+                return Response({"detail": "Mobile-money checkout currently supports UGX packages only."}, status=status.HTTP_409_CONFLICT)
+            if not Decimal("500") <= purchase.price_snapshot <= Decimal("5000000"):
+                return Response({"detail": "Relworx accepts UGX payments from 500 to 5,000,000."}, status=status.HTTP_409_CONFLICT)
             if purchase.payments.filter(status=Payment.Status.PENDING).exists():
                 return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
             payment = Payment.objects.create(
@@ -221,6 +225,90 @@ def verify_relworx_signature(request, payload):
     )
 
 
+def apply_relworx_result(request, payment, payload):
+    internal_reference = str(payload.get("internal_reference", ""))
+    if payment.internal_reference and not hmac.compare_digest(payment.internal_reference, internal_reference):
+        return RelworxWebhookView._reject_mismatch(request, payment, "internal reference")
+
+    provider_status = str(payload.get("status") or payload.get("request_status") or "").lower()
+    safe_payload = {
+        key: payload.get(key)
+        for key in ["status", "request_status", "customer_reference", "internal_reference", "currency", "amount", "provider", "charge", "completed_at"]
+        if key in payload
+    }
+    if provider_status == "success":
+        if str(payload.get("customer_reference", "")) != payment.reference:
+            return RelworxWebhookView._reject_mismatch(request, payment, "customer reference")
+        try:
+            amount = Decimal(str(payload.get("amount")))
+        except (InvalidOperation, TypeError):
+            return RelworxWebhookView._reject_mismatch(request, payment, "amount")
+        if amount != payment.amount:
+            return RelworxWebhookView._reject_mismatch(request, payment, "amount")
+        if str(payload.get("currency", "")).upper() != payment.currency.upper():
+            return RelworxWebhookView._reject_mismatch(request, payment, "currency")
+        if payment.status == Payment.Status.PAID:
+            return Response({"status": "ok"})
+
+        completed_at = parse_datetime(str(payload.get("completed_at", ""))) or timezone.now()
+        payment.status = Payment.Status.PAID
+        payment.paid_at = completed_at
+        payment.provider_message = str(payload.get("message", "Payment completed successfully."))[:240]
+        payment.provider_payload = safe_payload
+        payment.save(update_fields=["status", "paid_at", "provider_message", "provider_payload", "updated_at"])
+        payment.purchase.complete(completed_at)
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="payment.completed",
+            description=f"Relworx payment {payment.reference} completed.",
+            target=payment,
+            metadata={"provider": "relworx"},
+        )
+    elif provider_status == "failed":
+        if payment.status == Payment.Status.PAID:
+            return Response({"status": "ok"})
+        payment.status = Payment.Status.FAILED
+        payment.provider_message = str(payload.get("message", "Payment failed."))[:240]
+        payment.provider_payload = safe_payload
+        payment.save(update_fields=["status", "provider_message", "provider_payload", "updated_at"])
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="payment.failed",
+            description=f"Relworx payment {payment.reference} failed.",
+            target=payment,
+        )
+    elif provider_status not in {"pending", "processing", "in_progress"}:
+        return Response({"detail": "Unsupported payment status."}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({"status": "ok"})
+
+
+class PaymentRefreshView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        payment = Payment.objects.select_related("purchase__package", "package", "user").filter(pk=pk, user=request.user).first()
+        if not payment:
+            return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+        if payment.status != Payment.Status.PENDING:
+            return Response(PaymentSerializer(payment, context={"request": request}).data)
+
+        try:
+            provider_result = check_mobile_money_payment(payment)
+        except RelworxError as error:
+            response_status = status.HTTP_202_ACCEPTED if error.uncertain else status.HTTP_502_BAD_GATEWAY
+            return Response({"detail": str(error), "status": payment.status}, status=response_status)
+
+        with transaction.atomic():
+            locked_payment = Payment.objects.select_for_update().select_related("purchase__package", "package", "user").get(pk=payment.pk)
+            result = apply_relworx_result(request, locked_payment, provider_result)
+            if result.status_code >= 400:
+                return result
+        locked_payment.refresh_from_db()
+        return Response(PaymentSerializer(locked_payment, context={"request": request}).data)
+
+
 class RelworxWebhookView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -250,67 +338,7 @@ class RelworxWebhookView(APIView):
                 )
                 return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
 
-            internal_reference = str(payload.get("internal_reference", ""))
-            if payment.internal_reference and not hmac.compare_digest(payment.internal_reference, internal_reference):
-                return self._reject_mismatch(request, payment, "internal reference")
-
-            provider_status = str(payload.get("status", "")).lower()
-            safe_payload = {
-                key: payload.get(key)
-                for key in ["status", "customer_reference", "internal_reference", "currency", "amount", "provider", "charge", "completed_at"]
-                if key in payload
-            }
-            if provider_status == "success":
-                try:
-                    amount = Decimal(str(payload.get("amount")))
-                except (InvalidOperation, TypeError):
-                    return self._reject_mismatch(request, payment, "amount")
-                if amount != payment.amount:
-                    return self._reject_mismatch(request, payment, "amount")
-                if str(payload.get("currency", "")).upper() != payment.currency.upper():
-                    return self._reject_mismatch(request, payment, "currency")
-                if payment.status == Payment.Status.PAID:
-                    record_activity(
-                        request,
-                        category=ActivityLog.Category.SUBSCRIPTION,
-                        action="payment.webhook_duplicate",
-                        description=f"Duplicate success webhook received for {payment.reference}.",
-                        target=payment,
-                    )
-                    return Response({"status": "ok"})
-
-                completed_at = parse_datetime(str(payload.get("completed_at", ""))) or timezone.now()
-                payment.status = Payment.Status.PAID
-                payment.paid_at = completed_at
-                payment.provider_message = str(payload.get("message", "Payment completed successfully."))[:240]
-                payment.provider_payload = safe_payload
-                payment.save(update_fields=["status", "paid_at", "provider_message", "provider_payload", "updated_at"])
-                payment.purchase.complete(completed_at)
-                record_activity(
-                    request,
-                    category=ActivityLog.Category.SUBSCRIPTION,
-                    action="payment.completed",
-                    description=f"Relworx payment {payment.reference} completed.",
-                    target=payment,
-                    metadata={"provider": "relworx"},
-                )
-            elif provider_status == "failed":
-                if payment.status == Payment.Status.PAID:
-                    return Response({"status": "ok"})
-                payment.status = Payment.Status.FAILED
-                payment.provider_message = str(payload.get("message", "Payment failed."))[:240]
-                payment.provider_payload = safe_payload
-                payment.save(update_fields=["status", "provider_message", "provider_payload", "updated_at"])
-                record_activity(
-                    request,
-                    category=ActivityLog.Category.SUBSCRIPTION,
-                    action="payment.failed",
-                    description=f"Relworx payment {payment.reference} failed.",
-                    target=payment,
-                )
-            else:
-                return Response({"detail": "Unsupported payment status."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({"status": "ok"})
+            return apply_relworx_result(request, payment, payload)
 
     @staticmethod
     def _reject_mismatch(request, payment, field):

@@ -34,6 +34,18 @@ Copy the values from `.env.example` into the deployment environment. Configure t
 
 Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
 
+Complete this production checklist in the Relworx dashboard:
+
+1. Create the business account and copy its account number into `RELWORX_ACCOUNT_NO`.
+2. Generate an API key, authorize that key for the same business account, and store it as `RELWORX_API_KEY`.
+3. Add the production server's outbound public IP under **Edit Business Account → API Authorized IPs**.
+4. Ask Relworx support to enable UGX transactions if the wallet reports `Can't transact in UGX`.
+5. Copy the business account's webhook authentication key into `RELWORX_WEBHOOK_SIGNING_KEY`.
+6. Set the Request Payment Webhook to the exact public `RELWORX_WEBHOOK_URL`, including HTTPS and the trailing slash. The configured value and callback URL must match byte-for-byte for signature verification.
+7. Keep every Relworx secret in the Django/cPanel environment only. Do not use `VITE_` variables for these values.
+
+Checkout initiates an MTN/Airtel prompt and polls Relworx's request-status endpoint while awaiting the signed webhook. This reconciliation path recovers completed payments if a webhook is delayed or missed; amount, currency, customer reference, and Relworx internal reference are all checked before access is unlocked.
+
 ## Deployment
 
 Pull requests into `main` run the Django checks and tests. After a pull request
