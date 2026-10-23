@@ -173,6 +173,32 @@ class PurchaseFlowTests(APITestCase):
         self.package.save(update_fields=["deleted_at"])
         self.assertEqual(self.client.get("/api/v1/packages/").data, [])
 
+    def test_inactive_package_is_not_public_or_purchasable(self):
+        self.package.is_active = False
+        self.package.save(update_fields=["is_active"])
+
+        self.assertEqual(self.client.get("/api/v1/packages/").data, [])
+        self.client.force_login(self.customer)
+        response = self.client.post("/api/v1/me/purchases/", {"package_id": self.package.id}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Purchase.objects.count(), 0)
+
+    def test_owner_can_deactivate_a_package(self):
+        self.client.force_login(self.owner)
+
+        response = self.client.patch(
+            f"/api/v1/owner/packages/{self.package.id}/",
+            {"is_active": False},
+            format="json",
+        )
+
+        self.package.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["is_active"])
+        self.assertFalse(self.package.is_active)
+        self.assertFalse(self.package.is_open)
+
     def test_guest_cannot_create_purchase(self):
         response = self.client.post("/api/v1/me/purchases/", {"package_id": self.package.id}, format="json")
         self.assertIn(response.status_code, [401, 403])

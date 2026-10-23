@@ -66,7 +66,7 @@ class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         now = timezone.now()
-        return Package.objects.filter(deleted_at__isnull=True).annotate(
+        return Package.objects.filter(deleted_at__isnull=True, is_active=True).annotate(
             open_order=Case(
                 When(closes_at__gt=now, then=0),
                 default=1,
@@ -360,7 +360,11 @@ class OwnerDashboardView(APIView):
         now = timezone.now()
         return Response({
             "customers": User.objects.filter(is_staff=False).count(),
-            "active_packages": Package.objects.filter(deleted_at__isnull=True, closes_at__gt=now).count(),
+            "active_packages": Package.objects.filter(
+                deleted_at__isnull=True,
+                is_active=True,
+                closes_at__gt=now,
+            ).count(),
             "pending_payments": Payment.objects.filter(status=Payment.Status.PENDING).count(),
             "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
             "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,

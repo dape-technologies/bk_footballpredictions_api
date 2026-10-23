@@ -23,6 +23,7 @@ class Package(models.Model):
     access_label = models.CharField(max_length=80, default="Premium predictions")
     benefits = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to="packages/", blank=True, null=True)
+    is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
     deleted_at = models.DateTimeField(blank=True, null=True)
@@ -34,7 +35,7 @@ class Package(models.Model):
 
     @property
     def is_open(self):
-        return self.deleted_at is None and self.closes_at > timezone.now()
+        return self.is_active and self.deleted_at is None and self.closes_at > timezone.now()
 
     def __str__(self):
         return self.name

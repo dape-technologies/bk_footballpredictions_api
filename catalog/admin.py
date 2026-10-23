@@ -5,8 +5,8 @@ from .models import Package, Payment, Prediction, Purchase, RecentWin, Testimoni
 
 @admin.register(Package)
 class PackageAdmin(admin.ModelAdmin):
-    list_display = ["name", "package_type", "price", "closes_at", "is_open", "win_probability", "code"]
-    list_filter = ["package_type", "closes_at"]
+    list_display = ["name", "package_type", "price", "closes_at", "is_active", "is_open", "win_probability", "code"]
+    list_filter = ["is_active", "package_type", "closes_at"]
     search_fields = ["name", "code", "betslip_link"]
 
 

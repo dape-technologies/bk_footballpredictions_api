@@ -30,7 +30,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
         model = Package
         fields = [
             "id", "name", "slug", "package_type", "price", "currency",
-            "win_probability", "closes_at", "image_url", "is_open",
+            "win_probability", "closes_at", "image_url", "is_active", "is_open",
         ]
 
     def get_image_url(self, obj):
@@ -47,7 +47,7 @@ class PackageSerializer(serializers.ModelSerializer):
             "id", "name", "slug", "package_type", "description", "price", "currency",
             "win_probability", "closes_at", "betslip_link", "code", "access_label",
             "benefits", "image", "image_url", "is_featured", "display_order",
-            "is_open", "created_at", "updated_at",
+            "is_active", "is_open", "created_at", "updated_at",
         ]
         extra_kwargs = {
             "image": {"write_only": True, "required": False},
