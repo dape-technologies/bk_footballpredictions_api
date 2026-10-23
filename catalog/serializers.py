@@ -3,7 +3,7 @@ import re
 from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
-from .models import Package, Payment, Prediction, Purchase, RecentWin, Testimonial
+from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
 
 
 def media_url(request, field):
@@ -77,15 +77,54 @@ class PackageSerializer(serializers.ModelSerializer):
 class PaymentSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     package = PublicPackageSerializer(read_only=True)
+    receipt_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
             "id", "reference", "internal_reference", "user", "package", "amount",
             "currency", "status", "provider", "payer_msisdn", "provider_message",
-            "paid_at", "created_at", "updated_at",
+            "provider_transaction_id", "provider_charge", "failure_category",
+            "failure_code", "failure_reason", "submitted_at", "confirmed_at",
+            "failed_at", "last_checked_at", "check_attempts", "receipt_number",
+            "receipt_issued_at", "receipt_url", "paid_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+    def get_receipt_url(self, obj):
+        if obj.status != Payment.Status.PAID:
+            return ""
+        request = self.context.get("request")
+        path = f"/api/v1/me/payments/{obj.pk}/receipt/"
+        return request.build_absolute_uri(path) if request else path
+
+
+class PaymentEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentEvent
+        fields = ["id", "event_type", "source", "status", "message", "payload", "created_at"]
+        read_only_fields = fields
+
+
+class PaymentAlertSerializer(serializers.ModelSerializer):
+    payment_reference = serializers.CharField(source="payment.reference", read_only=True, default="")
+    is_resolved = serializers.ReadOnlyField()
+
+    class Meta:
+        model = PaymentAlert
+        fields = [
+            "id", "payment", "payment_reference", "alert_key", "severity", "title",
+            "message", "is_resolved", "resolved_at", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class PaymentDetailSerializer(PaymentSerializer):
+    events = PaymentEventSerializer(many=True, read_only=True)
+    alerts = PaymentAlertSerializer(many=True, read_only=True)
+
+    class Meta(PaymentSerializer.Meta):
+        fields = PaymentSerializer.Meta.fields + ["events", "alerts", "provider_payload"]
 
 
 class PurchaseSerializer(serializers.ModelSerializer):

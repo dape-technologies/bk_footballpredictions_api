@@ -46,6 +46,16 @@ Complete this production checklist in the Relworx dashboard:
 
 Checkout initiates an MTN/Airtel prompt and polls Relworx's request-status endpoint while awaiting the signed webhook. This reconciliation path recovers completed payments if a webhook is delayed or missed; amount, currency, customer reference, and Relworx internal reference are all checked before access is unlocked.
 
+## Scheduled payment reconciliation
+
+Run the provider-backed reconciliation command every five minutes in production:
+
+```bash
+python manage.py reconcile_payments --batch-size 100 --max-attempts 12 --max-age-hours 24
+```
+
+The command checks submitted or pending attempts whose next-check time has arrived. It uses the Relworx internal reference when available and falls back to the unique BK customer reference after an uncertain initiation response. Exact reference, amount, and currency validation still applies. Repeated provider errors move the payment to `needs_review` and create an owner-visible alert; the command never marks a payment paid without a successful provider response.
+
 ## Deployment
 
 Pull requests into `main` run the Django checks and tests. After a pull request

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BK receipt {{ payment.receipt_number }}</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, sans-serif; color: #111; background: #f3f3ef; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 16px; }
+    main { width: min(720px, 100%); margin: auto; padding: 40px; background: #fff; border: 1px solid #d9d9d3; }
+    header { display: flex; align-items: start; justify-content: space-between; gap: 24px; padding-bottom: 24px; border-bottom: 2px solid #111; }
+    h1 { margin: 0; font-size: 32px; letter-spacing: -.04em; }
+    header p, footer p { margin: 6px 0 0; color: #666; }
+    .paid { padding: 8px 12px; color: #285726; background: #e3f3dc; font-size: 12px; font-weight: 800; text-transform: uppercase; }
+    dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin: 32px 0; }
+    dt { color: #707070; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    dd { margin: 6px 0 0; overflow-wrap: anywhere; font-weight: 700; }
+    .total { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 24px 0; border-block: 1px solid #ddd; }
+    .total strong { font-size: 30px; }
+    footer { margin-top: 28px; font-size: 12px; line-height: 1.6; }
+    .print-hint { margin-top: 24px; font-weight: 700; }
+    @media print { body { padding: 0; background: #fff; } main { width: 100%; border: 0; } .print-hint { display: none; } }
+    @media (max-width: 560px) { main { padding: 24px; } header { flex-direction: column; } dl { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>BK Football Predictions</h1><p>Official payment receipt</p></div>
+      <span class="paid">Paid</span>
+    </header>
+    <dl>
+      <div><dt>Receipt number</dt><dd>{{ payment.receipt_number }}</dd></div>
+      <div><dt>Payment date</dt><dd>{{ payment.confirmed_at|date:"d M Y, H:i T" }}</dd></div>
+      <div><dt>Customer</dt><dd>{{ payment.user.full_name }}</dd></div>
+      <div><dt>Customer phone</dt><dd>{{ payment.user.phone }}</dd></div>
+      <div><dt>Package</dt><dd>{{ payment.package.name }}</dd></div>
+      <div><dt>Payment provider</dt><dd>{{ payment.provider }}</dd></div>
+      <div><dt>BK reference</dt><dd>{{ payment.reference }}</dd></div>
+      <div><dt>Provider reference</dt><dd>{{ payment.internal_reference|default:"Not supplied" }}</dd></div>
+    </dl>
+    <div class="total"><span>Total paid</span><strong>{{ payment.currency }} {{ payment.amount }}</strong></div>
+    <footer>
+      <p>This receipt confirms payment for access to the named BK package. Keep the receipt number when contacting support.</p>
+      <p>Generated {{ payment.receipt_issued_at|date:"d M Y, H:i T" }}.</p>
+    </footer>
+    <p class="print-hint">Use your browser’s Print command to print or save this receipt as PDF.</p>
+  </main>
+</body>
+</html>

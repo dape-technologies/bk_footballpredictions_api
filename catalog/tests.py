@@ -2,15 +2,17 @@ import hashlib
 import hmac
 import time
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group
+from django.core.management import call_command
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from .models import Package, Payment, Prediction, Purchase
+from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase
 
 
 class OwnerRolePermissionTests(APITestCase):
@@ -19,6 +21,9 @@ class OwnerRolePermissionTests(APITestCase):
         "/api/v1/owner/activities/",
         "/api/v1/owner/packages/",
         "/api/v1/owner/payments/",
+        "/api/v1/owner/payments/report/",
+        "/api/v1/owner/payment-alerts/",
+        "/api/v1/owner/performance/",
         "/api/v1/owner/predictions/",
         "/api/v1/owner/recent-wins/",
         "/api/v1/owner/testimonials/",
@@ -266,7 +271,7 @@ class PurchaseFlowTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(Payment.objects.get(purchase=purchase).status, Payment.Status.PENDING)
+        self.assertEqual(Payment.objects.get(purchase=purchase).status, Payment.Status.SUBMITTED)
         retry = self.client.post(
             f"/api/v1/me/purchases/{purchase.id}/payment-attempts/",
             {"phone": "0773454899"},
@@ -311,7 +316,7 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(payment.status, Payment.Status.PAID)
         self.assertEqual(purchase.code_snapshot, "BK-DAY-78")
 
-    @patch("catalog.views.check_mobile_money_payment")
+    @patch("catalog.payment_services.check_mobile_money_payment")
     def test_status_refresh_recovers_a_missed_success_webhook(self, mocked_check):
         purchase, payment = self.start_payment()
         mocked_check.return_value = {
@@ -334,7 +339,7 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(payment.status, Payment.Status.PAID)
         self.assertTrue(purchase.is_paid)
 
-    @patch("catalog.views.check_mobile_money_payment")
+    @patch("catalog.payment_services.check_mobile_money_payment")
     def test_status_refresh_keeps_provider_pending_payment_pending(self, mocked_check):
         _, payment = self.start_payment()
         mocked_check.return_value = {
@@ -367,6 +372,8 @@ class PurchaseFlowTests(APITestCase):
         ]
         for index, overrides in enumerate(cases):
             if index:
+                PaymentAlert.objects.all().delete()
+                PaymentEvent.objects.all().delete()
                 Payment.objects.all().delete()
                 Purchase.objects.all().delete()
             purchase, payment = self.start_payment()
@@ -407,6 +414,84 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(response.data[0]["selection"], "Arsenal to win")
         purchase.refresh_from_db()
         self.assertIsNotNone(purchase.paid_at)
+
+    def test_success_records_provider_fields_events_and_receipt(self):
+        _, payment = self.start_payment()
+        response = self.signed_webhook(
+            payment,
+            charge="250.50",
+            provider_transaction_id="MTN-TXN-123",
+        )
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payment.provider_transaction_id, "MTN-TXN-123")
+        self.assertEqual(str(payment.provider_charge), "250.50")
+        self.assertIsNotNone(payment.confirmed_at)
+        self.assertTrue(payment.receipt_number.startswith("BK-RCP-"))
+        self.assertTrue(payment.events.filter(event_type="payment.confirmed").exists())
+
+    def test_customer_can_open_own_receipt_but_not_another_customers(self):
+        _, payment = self.start_payment()
+        self.signed_webhook(payment)
+        own = self.client.get(f"/api/v1/me/payments/{payment.id}/receipt/")
+        self.assertEqual(own.status_code, 200)
+        self.assertContains(own, "Official payment receipt")
+        self.client.force_login(self.other)
+        forbidden = self.client.get(f"/api/v1/me/payments/{payment.id}/receipt/")
+        self.assertEqual(forbidden.status_code, 404)
+
+    def test_owner_payment_detail_report_filters_and_csv_export(self):
+        _, payment = self.start_payment()
+        self.signed_webhook(payment, charge="100", provider_transaction_id="TXN-REPORT")
+        self.client.force_login(self.owner)
+
+        detail = self.client.get(f"/api/v1/owner/payments/{payment.id}/")
+        report = self.client.get("/api/v1/owner/payments/report/?status=paid")
+        exported = self.client.get("/api/v1/owner/payments/export.csv/?status=paid")
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertGreaterEqual(len(detail.data["events"]), 3)
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual(report.data["summary"]["confirmed"], 1)
+        self.assertEqual(str(report.data["summary"]["net_revenue"]), "9900")
+        self.assertEqual(exported.status_code, 200)
+        self.assertIn("text/csv", exported["Content-Type"])
+        self.assertIn("TXN-REPORT", exported.content.decode())
+
+    def test_measured_performance_uses_settled_published_predictions(self):
+        self.prediction.result = Prediction.Result.WON
+        self.prediction.save(update_fields=["result", "updated_at"])
+        response = self.client.get("/api/v1/performance/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["summary"]["settled"], 1)
+        self.assertEqual(response.data["summary"]["hit_rate"], 100)
+
+    @patch("catalog.payment_services.check_mobile_money_payment")
+    def test_scheduled_reconciliation_recovers_payment_without_open_browser(self, mocked_check):
+        purchase, payment = self.start_payment()
+        payment.reconciliation_next_at = timezone.now() - timedelta(seconds=1)
+        payment.save(update_fields=["reconciliation_next_at", "updated_at"])
+        mocked_check.return_value = {
+            "success": True,
+            "status": "success",
+            "message": "Request payment completed successfully.",
+            "customer_reference": payment.reference,
+            "internal_reference": payment.internal_reference,
+            "amount": 10000,
+            "currency": "UGX",
+            "provider": "MTN_UGANDA",
+            "provider_transaction_id": "TXN-CRON",
+            "completed_at": timezone.now().isoformat(),
+        }
+
+        output = StringIO()
+        call_command("reconcile_payments", stdout=output)
+
+        payment.refresh_from_db()
+        purchase.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PAID)
+        self.assertTrue(purchase.is_paid)
+        self.assertIn("updated=1", output.getvalue())
 
     def test_owner_has_no_manual_payment_resolution_endpoint(self):
         _, payment = self.start_payment()

@@ -7,9 +7,12 @@ from django.conf import settings
 
 
 class RelworxError(Exception):
-    def __init__(self, message, *, uncertain=False):
+    def __init__(self, message, *, uncertain=False, status_code=None, code="", payload=None):
         super().__init__(message)
         self.uncertain = uncertain
+        self.status_code = status_code
+        self.code = code
+        self.payload = payload or {}
 
 
 def _authenticated_request(url, *, data=None, method="GET"):
@@ -27,12 +30,18 @@ def _authenticated_request(url, *, data=None, method="GET"):
         with urlopen(request, timeout=settings.RELWORX_REQUEST_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
+        error_payload = {}
         try:
             error_payload = json.loads(error.read().decode("utf-8"))
             detail = error_payload.get("message") if isinstance(error_payload, dict) else None
         except (ValueError, AttributeError):
             detail = None
-        raise RelworxError(detail or "The payment provider rejected this request.") from error
+        raise RelworxError(
+            detail or "The payment provider rejected this request.",
+            status_code=error.code,
+            code=str(error_payload.get("code", "")) if isinstance(error_payload, dict) else "",
+            payload=error_payload if isinstance(error_payload, dict) else {},
+        ) from error
     except (URLError, TimeoutError, ValueError) as error:
         raise RelworxError(
             "Relworx has not confirmed whether the request was received. Please check again shortly.",
@@ -63,11 +72,10 @@ def request_mobile_money_payment(payment):
 def check_mobile_money_payment(payment):
     if not settings.RELWORX_API_KEY or not settings.RELWORX_ACCOUNT_NO:
         raise RelworxError("Payments are temporarily unavailable.")
-    if not payment.internal_reference:
-        raise RelworxError("Relworx has not assigned this payment a reference yet.", uncertain=True)
-
     query = urlencode({
-        "internal_reference": payment.internal_reference,
+        # Relworx accepts the provider reference or the original customer reference.
+        # The latter recovers requests whose initiation response timed out locally.
+        "internal_reference": payment.internal_reference or payment.reference,
         "account_no": settings.RELWORX_ACCOUNT_NO,
     })
     url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-request-status?{query}"

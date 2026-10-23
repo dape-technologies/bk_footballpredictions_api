@@ -8,12 +8,16 @@ from .views import (
     OwnerCustomerViewSet,
     OwnerDashboardView,
     OwnerPackageViewSet,
+    OwnerPaymentAlertViewSet,
     OwnerPaymentViewSet,
+    OwnerPerformanceView,
     OwnerPredictionViewSet,
     OwnerRecentWinViewSet,
     OwnerTestimonialViewSet,
     PaymentAttemptView,
+    PaymentReceiptView,
     PaymentRefreshView,
+    PublicPerformanceView,
     PublicPackageViewSet,
     PublicPredictionViewSet,
     PublicRecentWinViewSet,
@@ -30,6 +34,7 @@ public_router.register("testimonials", PublicTestimonialViewSet, basename="testi
 owner_router = DefaultRouter()
 owner_router.register("packages", OwnerPackageViewSet, basename="owner-package")
 owner_router.register("payments", OwnerPaymentViewSet, basename="owner-payment")
+owner_router.register("payment-alerts", OwnerPaymentAlertViewSet, basename="owner-payment-alert")
 owner_router.register("predictions", OwnerPredictionViewSet, basename="owner-prediction")
 owner_router.register("recent-wins", OwnerRecentWinViewSet, basename="owner-recent-win")
 owner_router.register("testimonials", OwnerTestimonialViewSet, basename="owner-testimonial")
@@ -42,7 +47,10 @@ urlpatterns = [
     path("me/purchases/<int:pk>/", MyPurchaseDetailView.as_view(), name="my-purchase-detail"),
     path("me/purchases/<int:pk>/payment-attempts/", PaymentAttemptView.as_view(), name="payment-attempt"),
     path("me/payments/<int:pk>/refresh/", PaymentRefreshView.as_view(), name="payment-refresh"),
+    path("me/payments/<int:pk>/receipt/", PaymentReceiptView.as_view(), name="payment-receipt"),
     path("payments/relworx/webhook/", RelworxWebhookView.as_view(), name="relworx-webhook"),
+    path("performance/", PublicPerformanceView.as_view(), name="public-performance"),
     path("owner/dashboard/", OwnerDashboardView.as_view(), name="owner-dashboard"),
+    path("owner/performance/", OwnerPerformanceView.as_view(), name="owner-performance"),
     path("owner/", include(owner_router.urls)),
 ]
