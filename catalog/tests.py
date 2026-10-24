@@ -585,3 +585,55 @@ class WalletPayoutTests(APITestCase):
         self.assertEqual(payout.status, PayoutRequest.Status.COMPLETED)
         self.assertEqual(payout.provider_fee_actual, Decimal("15"))
         self.assertTrue(WalletLedgerEntry.objects.filter(idempotency_key=f"payout:{payout.pk}:fee").exists())
+
+
+@override_settings(
+    RELWORX_API_KEY="test-api-key",
+    RELWORX_ACCOUNT_NO="REL-TEST",
+    RELWORX_WEBHOOK_SIGNING_KEY="test-signing-key",
+    RELWORX_PAYOUTS_ENABLED=True,
+)
+class DeveloperConsoleTests(APITestCase):
+    def setUp(self):
+        developer_group, _ = Group.objects.get_or_create(name="Developer")
+        owner_group, _ = Group.objects.get_or_create(name="Product Owner")
+        self.developer = User.objects.create_user(
+            phone="0704555001", first_name="Console", last_name="Developer", password="pass",
+        )
+        self.developer.groups.add(developer_group)
+        self.owner = User.objects.create_user(
+            phone="0704555002", first_name="Console", last_name="Owner", password="pass",
+        )
+        self.owner.groups.add(owner_group)
+
+    def test_developer_analytics_is_role_isolated(self):
+        self.client.force_login(self.owner)
+        self.assertEqual(self.client.get("/api/v1/developer/analytics/").status_code, 403)
+
+        self.client.force_login(self.developer)
+        response = self.client.get("/api/v1/developer/analytics/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("finance", response.data)
+        self.assertIn("commission", response.data)
+        self.assertIn("users", response.data)
+        self.assertIn("packages", response.data)
+        self.assertNotIn("support", response.data)
+
+    def test_gateway_configuration_only_contains_relworx(self):
+        self.client.force_login(self.developer)
+        response = self.client.get("/api/v1/developer/payment-gateway/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["active_provider"], "relworx")
+        self.assertEqual(response.data["provider"]["name"], "Relworx")
+        self.assertTrue(response.data["provider"]["capabilities"]["payouts"])
+        self.assertNotContains(response, "jpesa", status_code=200)
+
+    @patch("catalog.views.check_wallet_balance")
+    def test_gateway_connection_check_is_non_monetary(self, mocked_balance):
+        mocked_balance.return_value = {"success": True, "balance": "2500"}
+        self.client.force_login(self.developer)
+        response = self.client.post("/api/v1/developer/payment-gateway/relworx/check/", {}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["ready"])
+        self.assertNotIn("balance", response.data)
+        mocked_balance.assert_called_once_with("UGX")

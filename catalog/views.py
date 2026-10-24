@@ -12,6 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Avg, Case, Count, IntegerField, Q, Sum, When
+from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -37,8 +38,8 @@ from .payment_services import (
     record_verification_mismatch,
 )
 from .payout_services import execute_payout, settle_payout
-from .relworx import RelworxError, request_mobile_money_payment
-from .wallet_services import cancel_payout, create_payout, serialize_payout, wallet_payload
+from .relworx import RelworxError, check_wallet_balance, request_mobile_money_payment
+from .wallet_services import cancel_payout, create_payout, serialize_payout, wallet_payload, wallet_summary
 from .serializers import (
     PackageSerializer,
     PaymentAttemptSerializer,
@@ -510,6 +511,216 @@ class OwnerPayoutCancelView(PayoutCancelView):
 class DeveloperPayoutCancelView(PayoutCancelView):
     beneficiary = "developer"
     permission_classes = [IsDeveloper]
+
+
+class DeveloperAnalyticsView(APIView):
+    """Read-only operational analytics for the isolated developer console."""
+
+    permission_classes = [IsDeveloper]
+
+    def get(self, request):
+        now = timezone.now()
+        local_now = timezone.localtime(now)
+        today_start = timezone.make_aware(datetime.combine(local_now.date(), datetime_time.min))
+        week_start = today_start - timedelta(days=local_now.weekday())
+        month_start = timezone.make_aware(datetime.combine(local_now.date().replace(day=1), datetime_time.min))
+        chart_start = today_start - timedelta(days=29)
+
+        payments = Payment.objects.select_related("package", "user")
+        paid = payments.filter(status=Payment.Status.PAID)
+        today_attempts = payments.filter(created_at__gte=today_start)
+        today_paid = paid.filter(confirmed_at__gte=today_start)
+        pending_statuses = [Payment.Status.CREATED, Payment.Status.SUBMITTED, Payment.Status.PENDING]
+        failed_statuses = [Payment.Status.FAILED, Payment.Status.EXPIRED, Payment.Status.CANCELLED]
+
+        by_status = {
+            row["status"]: {"count": row["count"], "amount": row["amount"] or Decimal("0")}
+            for row in payments.values("status").annotate(count=Count("id"), amount=Sum("amount"))
+        }
+        by_package = {
+            row["package__name"]: row["amount"] or Decimal("0")
+            for row in paid.values("package__name").annotate(amount=Sum("amount")).order_by("package__name")
+        }
+        by_provider = {
+            (row["provider"] or "relworx"): {"count": row["count"], "amount": row["amount"] or Decimal("0")}
+            for row in paid.values("provider").annotate(count=Count("id"), amount=Sum("amount"))
+        }
+        failures = {
+            (row["failure_category"] or "unclassified"): {
+                "count": row["count"], "amount": row["amount"] or Decimal("0"),
+            }
+            for row in payments.filter(status__in=failed_statuses)
+            .values("failure_category").annotate(count=Count("id"), amount=Sum("amount"))
+        }
+
+        recent_payments = []
+        for payment in payments.order_by("-created_at")[:50]:
+            digits = "".join(character for character in payment.payer_msisdn if character.isdigit())
+            masked_phone = f"{'*' * max(0, len(digits) - 4)}{digits[-4:]}" if digits else ""
+            recent_payments.append({
+                "id": payment.pk,
+                "amount": payment.amount,
+                "package": payment.package.name,
+                "status": payment.status,
+                "provider": payment.provider,
+                "phone": masked_phone,
+                "reference": payment.reference,
+                "provider_reference": payment.internal_reference,
+                "failure_category": payment.failure_category,
+                "failure_reason": payment.failure_reason,
+                "created_at": payment.created_at,
+                "confirmed_at": payment.confirmed_at,
+                "failed_at": payment.failed_at,
+            })
+
+        commission_total = paid.aggregate(value=Sum("developer_commission"))["value"] or Decimal("0")
+        developer_wallet = wallet_summary("developer")
+        completed_payouts = PayoutRequest.objects.filter(
+            beneficiary="developer", status=PayoutRequest.Status.COMPLETED,
+        )
+        completed_payout_total = completed_payouts.aggregate(value=Sum("amount"))["value"] or Decimal("0")
+        payout_status = {
+            row["status"]: {"count": row["count"], "amount": row["amount"] or Decimal("0")}
+            for row in PayoutRequest.objects.filter(beneficiary="developer")
+            .values("status").annotate(count=Count("id"), amount=Sum("amount"))
+        }
+
+        customers = User.objects.filter(is_staff=False, is_superuser=False).exclude(
+            groups__name__in=["Developer", "Product Owner"],
+        ).distinct()
+        purchases = Purchase.objects.select_related("package")
+        active_packages = Package.objects.filter(deleted_at__isnull=True, is_active=True, closes_at__gt=now)
+
+        revenue_chart = list(
+            paid.filter(confirmed_at__gte=chart_start).annotate(date=TruncDate("confirmed_at"))
+            .values("date").annotate(amount=Sum("amount")).order_by("date")
+        )
+        signup_chart = list(
+            customers.filter(created_at__gte=chart_start).annotate(date=TruncDate("created_at"))
+            .values("date").annotate(count=Count("id")).order_by("date")
+        )
+
+        total_attempts = payments.count()
+        total_paid = paid.count()
+        attempted_amount = payments.aggregate(value=Sum("amount"))["value"] or Decimal("0")
+        total_revenue = paid.aggregate(value=Sum("amount"))["value"] or Decimal("0")
+        pending_queryset = payments.filter(status__in=pending_statuses)
+        failed_queryset = payments.filter(status__in=failed_statuses)
+        missing_transactions = paid.filter(Q(provider_transaction_id="") | Q(provider_transaction_id__isnull=True)).count()
+
+        return Response({
+            "generated_at": now,
+            "timezone": settings.TIME_ZONE,
+            "finance": {
+                "attempted_count": total_attempts,
+                "attempted_amount": attempted_amount,
+                "total_revenue": total_revenue,
+                "revenue_today": today_paid.aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                "revenue_this_week": paid.filter(confirmed_at__gte=week_start).aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                "revenue_this_month": paid.filter(confirmed_at__gte=month_start).aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                "confirmation_rate": round(total_paid * 100 / total_attempts, 2) if total_attempts else 0,
+                "pending_count": pending_queryset.count(),
+                "pending_amount": pending_queryset.aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                "failed_count": failed_queryset.count(),
+                "failed_amount": failed_queryset.aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                "today": {
+                    "confirmed_count": today_paid.count(),
+                    "confirmed_amount": today_paid.aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                    "attempted_count": today_attempts.count(),
+                    "attempted_amount": today_attempts.aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                    "failed_count": today_attempts.filter(status__in=failed_statuses).count(),
+                    "failed_amount": today_attempts.filter(status__in=failed_statuses).aggregate(value=Sum("amount"))["value"] or Decimal("0"),
+                },
+                "by_status": by_status,
+                "by_package": by_package,
+                "by_provider": by_provider,
+                "failures_by_category": failures,
+                "recent_payments": recent_payments,
+                "audit": {
+                    "ledger_count": total_attempts,
+                    "missing_confirmation_count": paid.filter(confirmed_at__isnull=True).count(),
+                    "missing_transaction_count": missing_transactions,
+                    "healthy": not paid.filter(confirmed_at__isnull=True).exists() and not missing_transactions,
+                },
+            },
+            "commission": {
+                "enabled": settings.DEVELOPER_COMMISSION_RATE > 0,
+                "ratio": settings.DEVELOPER_COMMISSION_RATE,
+                "total_earned": commission_total,
+                "wallet_credited": developer_wallet["credited"],
+                "available": developer_wallet["available"],
+                "reserved": developer_wallet["reserved"],
+                "total_withdrawn": completed_payout_total,
+                "by_payout_status": payout_status,
+                "recent": [
+                    {
+                        "id": payment.pk, "payment_reference": payment.reference,
+                        "package": payment.package.name, "amount": payment.amount,
+                        "commission": payment.developer_commission,
+                        "confirmed_at": payment.confirmed_at,
+                    }
+                    for payment in paid.filter(developer_commission__gt=0).order_by("-confirmed_at")[:25]
+                ],
+            },
+            "users": {
+                "total": customers.count(),
+                "new_today": customers.filter(created_at__gte=today_start).count(),
+                "new_this_week": customers.filter(created_at__gte=week_start).count(),
+                "new_this_month": customers.filter(created_at__gte=month_start).count(),
+            },
+            "packages": {
+                "total": Package.objects.filter(deleted_at__isnull=True).count(),
+                "active_total": active_packages.count(),
+                "purchase_count": purchases.count(),
+                "paid_purchase_count": purchases.filter(paid_at__isnull=False).count(),
+                "items": list(
+                    Package.objects.filter(deleted_at__isnull=True).annotate(
+                        purchase_count=Count("purchases"),
+                        paid_count=Count("purchases", filter=Q(purchases__paid_at__isnull=False)),
+                    ).values("id", "name", "package_type", "price", "currency", "is_active", "closes_at", "purchase_count", "paid_count")
+                ),
+            },
+            "charts": {"revenue": revenue_chart, "signups": signup_chart},
+        })
+
+
+class DeveloperPaymentGatewayView(APIView):
+    permission_classes = [IsDeveloper]
+
+    def get(self, request):
+        configured = bool(settings.RELWORX_API_KEY and settings.RELWORX_ACCOUNT_NO)
+        return Response({
+            "active_provider": "relworx",
+            "provider": {
+                "name": "Relworx",
+                "configured": configured,
+                "ready": configured,
+                "message": "Relworx is configured for BK payments." if configured else "Relworx credentials are incomplete.",
+                "capabilities": {
+                    "collections": configured,
+                    "payouts": settings.RELWORX_PAYOUTS_ENABLED,
+                    "signed_webhooks": bool(settings.RELWORX_WEBHOOK_SIGNING_KEY),
+                    "scheduled_reconciliation": True,
+                },
+            },
+        })
+
+
+class DeveloperPaymentGatewayCheckView(APIView):
+    permission_classes = [IsDeveloper]
+
+    def post(self, request):
+        if not settings.RELWORX_API_KEY or not settings.RELWORX_ACCOUNT_NO:
+            return Response({"ready": False, "message": "Relworx credentials are incomplete."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        try:
+            result = check_wallet_balance("UGX")
+        except RelworxError as error:
+            return Response({"ready": False, "message": str(error)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return Response({
+            "ready": bool(result.get("success")),
+            "checked_at": timezone.now(),
+            "message": "Relworx authentication and wallet connection are working.",
+        })
 
 
 class OwnerDashboardView(APIView):

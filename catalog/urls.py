@@ -29,6 +29,9 @@ from .views import (
     DeveloperWalletView,
     DeveloperPayoutRequestView,
     DeveloperPayoutCancelView,
+    DeveloperAnalyticsView,
+    DeveloperPaymentGatewayView,
+    DeveloperPaymentGatewayCheckView,
 )
 
 public_router = DefaultRouter()
@@ -64,5 +67,8 @@ urlpatterns = [
     path("developer/wallet/", DeveloperWalletView.as_view(), name="developer-wallet"),
     path("developer/payout-requests/", DeveloperPayoutRequestView.as_view(), name="developer-payout-request"),
     path("developer/payout-requests/<int:pk>/cancel/", DeveloperPayoutCancelView.as_view(), name="developer-payout-cancel"),
+    path("developer/analytics/", DeveloperAnalyticsView.as_view(), name="developer-analytics"),
+    path("developer/payment-gateway/", DeveloperPaymentGatewayView.as_view(), name="developer-payment-gateway"),
+    path("developer/payment-gateway/relworx/check/", DeveloperPaymentGatewayCheckView.as_view(), name="developer-payment-gateway-check"),
     path("owner/", include(owner_router.urls)),
 ]
