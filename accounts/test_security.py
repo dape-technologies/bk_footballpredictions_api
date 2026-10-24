@@ -8,7 +8,7 @@ from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from .models import User, PrivilegedSession, SecurityChallenge, RecoveryCode, EmailNotice
+from .models import User, PrivilegedSession, SecurityChallenge, EmailNotice
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -17,6 +17,8 @@ class PrivilegedSecurityTests(APITestCase):
         cache.clear()
         self.owner = User.objects.create_user(phone="0705111001", password="test-password-secure")
         self.owner.groups.add(Group.objects.get_or_create(name="Product Owner")[0])
+        self.developer = User.objects.create_user(phone="0705111003", password="developer-password-secure")
+        self.developer.groups.add(Group.objects.get_or_create(name="Developer")[0])
         self.customer = User.objects.create_user(phone="0705111002", password="test-password-secure")
 
     def code(self, action, **extra):
@@ -29,17 +31,24 @@ class PrivilegedSecurityTests(APITestCase):
         self.assertEqual(self.client.get("/api/v1/auth/security/").status_code, 403)
         self.assertEqual(self.client.get("/api/v1/operations/report/").status_code, 403)
 
-    def test_recovery_codes_are_hashed_and_single_use(self):
+    def test_developer_can_view_only_current_owner_otp(self):
         self.client.force_login(self.owner)
-        otp = self.code("recovery_codes")
-        result = self.client.post("/api/v1/auth/security/", {"action": "recovery_codes", "otp": otp}, format="json")
-        self.assertEqual(result.status_code, 200)
-        self.assertEqual(len(result.data["codes"]), 8)
-        code = result.data["codes"][0]
-        self.assertFalse(RecoveryCode.objects.filter(digest=code).exists())
-        payload = {"action": "destination", "destination": "0749471777", "password": "test-password-secure", "recovery_code": code}
-        self.assertEqual(self.client.post("/api/v1/auth/security/", payload, format="json").status_code, 200)
-        self.assertEqual(self.client.post("/api/v1/auth/security/", payload, format="json").status_code, 400)
+        code = self.code("destination", destination="0749471777")
+        challenge = SecurityChallenge.objects.get()
+        self.assertNotIn(code, challenge.code_ciphertext)
+        owner_payload = self.client.get("/api/v1/auth/security/").data
+        self.assertNotIn("current_owner_otps", owner_payload)
+        self.client.force_login(self.developer)
+        response = self.client.get("/api/v1/auth/security/")
+        self.assertEqual(response["Cache-Control"], "no-store, private")
+        payload = response.data
+        self.assertEqual(payload["current_owner_otps"][0]["code"], code)
+        self.assertEqual(payload["current_owner_otps"][0]["purpose"], "destination")
+
+    def test_recovery_code_action_is_removed(self):
+        self.client.force_login(self.owner)
+        result = self.client.post("/api/v1/auth/security/", {"action": "owner_recovery_code", "password": "test-password-secure"}, format="json")
+        self.assertEqual(result.status_code, 400)
 
     def test_destination_code_cannot_authorize_different_number(self):
         self.client.force_login(self.owner)
@@ -60,7 +69,7 @@ class PrivilegedSecurityTests(APITestCase):
 
     def test_five_invalid_codes_exhaust_challenge(self):
         self.client.force_login(self.owner)
-        otp = self.code("recovery_codes")
+        otp = self.code("destination", destination="0749471777")
         for _ in range(5):
-            self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "recovery_codes", "otp": "wrong"}, format="json").status_code, 400)
-        self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "recovery_codes", "otp": otp}, format="json").status_code, 400)
+            self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0749471777", "otp": "wrong"}, format="json").status_code, 400)
+        self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0749471777", "otp": otp}, format="json").status_code, 400)

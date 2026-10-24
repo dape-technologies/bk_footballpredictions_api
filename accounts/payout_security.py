@@ -10,7 +10,8 @@ from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from rest_framework.exceptions import ValidationError
 
-from .models import SecurityChallenge, RecoveryCode, User
+from .models import SecurityChallenge, User
+from .otp_cipher import encrypt_otp
 
 
 def recipients(user):
@@ -50,7 +51,8 @@ def issue_code(request, purpose="payout"):
         SecurityChallenge.objects.filter(user=request.user, purpose=purpose, consumed_at=None).update(consumed_at=timezone.now())
         challenge = SecurityChallenge.objects.create(user=request.user, purpose=purpose,
             session_digest=digest(request.session.session_key), binding=binding,
-            code_hash=make_password(code), expires_at=timezone.now() + timedelta(minutes=5))
+            code_hash=make_password(code), code_ciphertext=encrypt_otp(code),
+            expires_at=timezone.now() + timedelta(minutes=5))
     try:
         send_mail("BK security verification", f"Your verification code is {code}. Action: {purpose}. Details: {binding}. Expires in 5 minutes. Do not share this code.",
                   settings.DEFAULT_FROM_EMAIL, recipients(request.user), fail_silently=False)
@@ -72,12 +74,5 @@ def verify_code(request, purpose="payout"):
             if valid:
                 challenge.consumed_at = timezone.now()
                 challenge.save(update_fields=["consumed_at"])
-        if not valid and request.data.get("recovery_code") and request.user.check_password(str(request.data.get("password", ""))):
-            recovery = RecoveryCode.objects.select_for_update().filter(user=request.user,
-                digest=digest(str(request.data["recovery_code"]).strip()), used_at=None).first()
-            if recovery:
-                recovery.used_at = timezone.now()
-                recovery.save(update_fields=["used_at"])
-                valid = True
     if not valid:
         raise ValidationError({"otp": "Invalid or expired verification code. Request a new code."})

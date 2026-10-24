@@ -84,6 +84,7 @@ class SecurityChallenge(models.Model):
     session_digest = models.CharField(max_length=64)
     binding = models.CharField(max_length=160)
     code_hash = models.CharField(max_length=128)
+    code_ciphertext = models.TextField(blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
     expires_at = models.DateTimeField()
     consumed_at = models.DateTimeField(null=True)
@@ -98,13 +99,6 @@ class PrivilegedSession(models.Model):
     started_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(auto_now_add=True)
     revoked_at = models.DateTimeField(null=True)
-
-
-class RecoveryCode(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    digest = models.CharField(max_length=64)
-    used_at = models.DateTimeField(null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class EmailNotice(models.Model):
