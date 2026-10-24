@@ -16,13 +16,11 @@ Release checklist and operational notes for wallet security and analytics.
 - Owner customer list excludes developers.
 - Public shell hidden on developer routes; role-specific mobile account shortcut.
 - Customer payment-attempt history, receipt link and retry button in account view.
-- Low provider balance management command. Schedule hourly only after mail delivery is verified.
 
 ## Operations
 
 - SMTP SSL authentication and test submission to both security contacts verified on port 465. Inbox placement cannot be established from an SMTP acceptance response.
 - Apply the accounts and catalog migrations before serving the new application.
-- Schedule `monitor_provider_balance` every five minutes; notifications deduplicate by hour.
 - Schedule `deliver_security_notices` every five minutes to retry failed alert delivery.
 - Schedule `cleanup_operational_data` daily; old performance samples and OTP challenges expire, while financial and access histories remain.
 - Run `optimize_package_images` once after migration. New package uploads optimize automatically; source images remain intact.
