@@ -23,7 +23,10 @@ def record_journey(request, kind, package=None, purchase=None, event_id=None):
         request.session["journey_visitor"] = visitor
     user = request.user if request.user.is_authenticated else None
     device, browser = context(request)
-    customer_type = "returning" if user and user.purchases.filter(paid_at__isnull=False).exists() else "new"
+    customer_type = ("returning" if user.purchases.filter(paid_at__isnull=False).exists() else "new") if user else "anonymous"
+    original = JourneyEvent.objects.filter(purchase=purchase, kind="checkout_open").order_by("created_at").first() if purchase and kind != "checkout_open" else None
+    if original:
+        customer_type = original.customer_type
     return JourneyEvent.objects.get_or_create(event_id=event_id or secrets.token_hex(16), defaults={
         "visitor": visitor, "kind": kind, "package": package, "purchase": purchase, "user": user,
         "device": device, "browser": browser, "customer_type": customer_type,
@@ -33,13 +36,14 @@ def record_journey(request, kind, package=None, purchase=None, event_id=None):
 def funnel_report():
     since = timezone.now() - timedelta(days=30)
     events = JourneyEvent.objects.filter(created_at__gte=since).select_related("package")
+    cohorts = {(row.visitor, row.package_id): row.customer_type for row in events.filter(kind="checkout_open").order_by("created_at")}
     grouped = {key: defaultdict(lambda: defaultdict(set)) for key in ["package", "device", "browser", "hour", "customer_type"]}
     totals = defaultdict(set)
     for event in events.iterator():
         journey = f"{event.visitor}:{event.package_id}"
         totals[event.kind].add(journey)
         dimensions = {"package": event.package.name if event.package else "Unknown", "device": event.device,
-            "browser": event.browser, "hour": timezone.localtime(event.created_at).strftime("%H:00"), "customer_type": event.customer_type}
+            "browser": event.browser, "hour": timezone.localtime(event.created_at).strftime("%H:00"), "customer_type": cohorts.get((event.visitor, event.package_id), event.customer_type)}
         for dimension, label in dimensions.items():
             grouped[dimension][label][event.kind].add(journey)
     stages = ["package_view", "checkout_open", "prompt_sent", "payment_confirmed", "betslip_access"]

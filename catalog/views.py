@@ -195,7 +195,8 @@ class MyPurchasesView(APIView):
         )
         purchase = Purchase.objects.select_related("package", "user").prefetch_related("payments__package", "payments__user").get(pk=purchase.pk)
         from .analytics_services import record_journey
-        record_journey(request, "checkout_open", purchase.package, purchase)
+        if not purchase.is_paid:
+            record_journey(request, "checkout_open", purchase.package, purchase)
         response_status = status.HTTP_201_CREATED if getattr(serializer, "was_created", False) else status.HTTP_200_OK
         return Response(PurchaseSerializer(purchase, context={"request": request}).data, status=response_status)
 
