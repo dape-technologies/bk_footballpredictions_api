@@ -545,6 +545,20 @@ class WalletPayoutTests(APITestCase):
         self.assertEqual(self.client.get("/api/v1/developer/wallet/").status_code, 200)
         self.assertEqual(self.client.get("/api/v1/owner/wallet/").status_code, 403)
 
+    def test_legacy_webhook_signature_is_accepted_during_url_transition(self):
+        payload = {"status": "success", "customer_reference": "missing", "internal_reference": "RWX"}
+        timestamp = int(time.time())
+        signed = f"http://testserver/api/v1/payments/relworx/webhook/{timestamp}"
+        for key in sorted(["status", "customer_reference", "internal_reference"]):
+            signed += f"{key}{payload.get(key, '')}"
+        signature = hmac.new(b"webhook-secret", signed.encode(), hashlib.sha256).hexdigest()
+        response = self.client.post(
+            "/api/v1/payments/relworx/webhook/", payload, format="json",
+            HTTP_RELWORX_SIGNATURE=f"t={timestamp},v={signature}",
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.data["detail"], "Payment not found.")
+
     @patch("catalog.payout_services.request_mobile_money_payout")
     def test_live_payout_is_idempotent_and_signed_webhook_settles_it(self, mocked_send):
         mocked_send.return_value = {"success": True, "internal_reference": "RWX-PAYOUT-1"}

@@ -6,6 +6,7 @@ import time
 from datetime import datetime, time as datetime_time, timedelta
 from decimal import Decimal
 from io import StringIO
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -315,18 +316,23 @@ def verify_relworx_signature(request, payload):
     if not settings.RELWORX_WEBHOOK_SIGNING_KEY or not settings.RELWORX_WEBHOOK_URL:
         return False
 
-    signed = f"{settings.RELWORX_WEBHOOK_URL}{timestamp}"
-    for key in sorted(["status", "customer_reference", "internal_reference"]):
-        signed += f"{key}{payload.get(key, '')}"
-    digest = hmac.new(
-        settings.RELWORX_WEBHOOK_SIGNING_KEY.encode("utf-8"),
-        signed.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
     supplied = parts.get("v", "")
-    return hmac.compare_digest(supplied, digest.hex()) or hmac.compare_digest(
-        supplied, base64.b64encode(digest).decode("ascii")
-    )
+    configured = urlsplit(settings.RELWORX_WEBHOOK_URL)
+    legacy_url = f"{configured.scheme}://{configured.netloc}/api/v1/payments/relworx/webhook/"
+    for webhook_url in dict.fromkeys([settings.RELWORX_WEBHOOK_URL, legacy_url]):
+        signed = f"{webhook_url}{timestamp}"
+        for key in sorted(["status", "customer_reference", "internal_reference"]):
+            signed += f"{key}{payload.get(key, '')}"
+        digest = hmac.new(
+            settings.RELWORX_WEBHOOK_SIGNING_KEY.encode("utf-8"),
+            signed.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        if hmac.compare_digest(supplied, digest.hex()) or hmac.compare_digest(
+            supplied, base64.b64encode(digest).decode("ascii")
+        ):
+            return True
+    return False
 
 
 class PaymentRefreshView(APIView):
