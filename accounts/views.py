@@ -7,9 +7,16 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from .models import ActivityLog, User
+from .login_security import issue_login_code, verify_login_code
 from .serializers import LoginSerializer, RegisterSerializer, UserSerializer
 from .services import record_activity
 from .throttles import LoginRateThrottle, RegistrationRateThrottle
+
+
+def challenge_response(payload):
+    response = Response(payload, status=status.HTTP_202_ACCEPTED)
+    response["Cache-Control"] = "no-store, private"
+    return response
 
 
 @ensure_csrf_cookie
@@ -44,6 +51,12 @@ def register_view(request):
 @throttle_classes([LoginRateThrottle])
 @csrf_protect
 def login_view(request):
+    if request.data.get("challenge_token") or request.data.get("otp"):
+        user = verify_login_code(request)
+        login(request, user)
+        record_activity(request, category=ActivityLog.Category.AUTHENTICATION,
+            action="auth.login_succeeded", description=f"{user.full_name} completed verified sign-in.", actor=user, target=user)
+        return Response(UserSerializer(user).data)
     serializer = LoginSerializer(data=request.data)
     if not serializer.is_valid():
         phone = User.normalize_phone(request.data.get("phone"))
@@ -56,6 +69,11 @@ def login_view(request):
         )
         raise serializers.ValidationError(serializer.errors)
     user = serializer.validated_data["user"]
+    if user.is_product_owner or user.is_developer:
+        challenge = issue_login_code(request, user)
+        record_activity(request, category=ActivityLog.Category.AUTHENTICATION,
+            action="auth.login_otp_sent", description="A privileged login verification code was issued.", actor=user, target=user)
+        return challenge_response(challenge)
     login(request, user)
     record_activity(
         request,
@@ -73,6 +91,12 @@ def login_view(request):
 @throttle_classes([LoginRateThrottle])
 @csrf_protect
 def admin_login_view(request):
+    if request.data.get("challenge_token") or request.data.get("otp"):
+        user = verify_login_code(request)
+        login(request, user)
+        record_activity(request, category=ActivityLog.Category.AUTHENTICATION,
+            action="auth.admin_login_succeeded", description=f"{user.full_name} completed verified administrator sign-in.", actor=user, target=user)
+        return Response(UserSerializer(user).data)
     serializer = LoginSerializer(data=request.data)
     if not serializer.is_valid():
         phone = User.normalize_phone(request.data.get("phone"))
@@ -97,16 +121,16 @@ def admin_login_view(request):
         )
         raise serializers.ValidationError("Owner or developer access is required.")
 
-    login(request, user)
+    challenge = issue_login_code(request, user)
     record_activity(
         request,
         category=ActivityLog.Category.AUTHENTICATION,
-        action="auth.admin_login_succeeded",
-        description=f"{user.full_name} signed in to the admin dashboard.",
+        action="auth.admin_login_otp_sent",
+        description="An administrator login verification code was issued.",
         actor=user,
         target=user,
     )
-    return Response(UserSerializer(user).data)
+    return challenge_response(challenge)
 
 
 @api_view(["POST"])

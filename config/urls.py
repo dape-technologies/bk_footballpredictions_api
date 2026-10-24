@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.conf import settings
 from django.conf.urls.static import static
 from django.http import JsonResponse
+from django.shortcuts import redirect
 from django.urls import include, path, re_path
 from django.views.static import serve
 
@@ -11,6 +12,7 @@ from catalog.views import RelworxWebhookView
 urlpatterns = [
     path("api/health/", lambda request: JsonResponse({"status": "ok"})),
     path("api/payments/webhooks/relworx", RelworxWebhookView.as_view(), name="relworx-webhook-public"),
+    path("django-admin/login/", lambda request: redirect("/owner/login?next=/django-admin/")),
     path("django-admin/", admin.site.urls),
     path("api/", include("api.urls")),
     path("api/v1/", include("accounts.urls")),

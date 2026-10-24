@@ -1,19 +1,28 @@
 from datetime import date, timedelta
+import re
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
+from django.core import mail
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import Client, override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from .models import User
+from .models import SecurityChallenge, User
 
 
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class AuthenticationTests(APITestCase):
     def setUp(self):
         cache.clear()
+
+    def complete_mfa(self, endpoint, challenge):
+        code = re.search(r"code is (\d{6})", mail.outbox[-1].body).group(1)
+        return self.client.post(endpoint, {
+            "challenge_token": challenge.data["challenge_token"], "otp": code,
+        }, format="json")
 
     def test_signed_out_me_response_is_unauthorized_not_forbidden(self):
         response = self.client.get(reverse("me"))
@@ -171,6 +180,17 @@ class AuthenticationTests(APITestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_customer_login_still_completes_without_otp(self):
+        customer = User.objects.create_user(phone="0701112245", password="strong-pass-27")
+        response = self.client.post(reverse("login"), {
+            "phone": customer.phone, "password": "strong-pass-27",
+        }, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["is_owner"])
+        self.assertFalse(response.data["is_developer"])
+        self.assertIn("_auth_user_id", self.client.session)
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_customer_cannot_create_an_admin_session(self):
         User.objects.create_user(
             phone="0701112288",
@@ -204,9 +224,17 @@ class AuthenticationTests(APITestCase):
             format="json",
         )
 
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.data["otp_required"])
+        self.assertEqual(response["Cache-Control"], "no-store, private")
+        self.assertEqual(set(mail.outbox[-1].to), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
+        code = re.search(r"code is (\d{6})", mail.outbox[-1].body).group(1)
+        self.assertNotIn(code, SecurityChallenge.objects.get(purpose="login").code_ciphertext)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
-        self.assertIn("sessionid", self.client.cookies)
+        self.assertIn("_auth_user_id", self.client.session)
 
     def test_developer_can_create_a_separate_privileged_session(self):
         developer = User.objects.create_user(
@@ -220,6 +248,10 @@ class AuthenticationTests(APITestCase):
             {"phone": developer.phone, "password": "strong-pass-27"},
             format="json",
         )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(set(mail.outbox[-1].to), {"dapetech.2@gmail.com"})
+        self.assertNotIn("_auth_user_id", self.client.session)
+        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_developer"])
         self.assertFalse(response.data["is_owner"])
@@ -251,8 +283,30 @@ class AuthenticationTests(APITestCase):
             format="json",
         )
 
+        self.assertEqual(response.status_code, 202)
+        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
+
+    def test_privileged_public_login_also_requires_otp(self):
+        owner = User.objects.create_superuser(phone="0701112399", password="strong-pass-27")
+        response = self.client.post(reverse("login"), {"phone": owner.phone, "password": "strong-pass-27"}, format="json")
+        self.assertEqual(response.status_code, 202)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        response = self.complete_mfa(reverse("login"), response)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_login_otp_is_session_bound_and_exhausts_after_five_attempts(self):
+        owner = User.objects.create_superuser(phone="0701112400", password="strong-pass-27")
+        challenge = self.client.post(reverse("admin-login"), {"phone": owner.phone, "password": "strong-pass-27"}, format="json")
+        token = challenge.data["challenge_token"]
+        other_client = self.client_class()
+        self.assertEqual(other_client.post(reverse("admin-login"), {"challenge_token": token, "otp": "000000"}, format="json").status_code, 400)
+        for _ in range(5):
+            self.assertEqual(self.client.post(reverse("admin-login"), {"challenge_token": token, "otp": "000000"}, format="json").status_code, 400)
+        code = re.search(r"code is (\d{6})", mail.outbox[0].body).group(1)
+        self.assertEqual(self.client.post(reverse("admin-login"), {"challenge_token": token, "otp": code}, format="json").status_code, 400)
 
     @override_settings(
         ADMIN_LOGIN_USERNAME="admin",
@@ -282,13 +336,9 @@ class AuthenticationTests(APITestCase):
     def test_seeded_admin_alias_can_use_django_admin(self):
         call_command("ensure_admin", verbosity=0)
 
-        response = self.client.post(
-            reverse("admin:login"),
-            {"username": "admin", "password": "bkpassword", "next": reverse("admin:index")},
-        )
-
-        self.assertRedirects(
-            response,
-            reverse("admin:index"),
-            fetch_redirect_response=False,
-        )
+        response = self.client.get(reverse("admin:login"))
+        self.assertRedirects(response, "/owner/login?next=/django-admin/", fetch_redirect_response=False)
+        challenge = self.client.post(reverse("admin-login"), {"phone": "admin", "password": "bkpassword"}, format="json")
+        self.assertEqual(challenge.status_code, 202)
+        self.assertEqual(self.complete_mfa(reverse("admin-login"), challenge).status_code, 200)
+        self.assertIn("_auth_user_id", self.client.session)
