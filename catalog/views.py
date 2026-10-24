@@ -2,6 +2,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import mimetypes
 import time
 from datetime import datetime, time as datetime_time, timedelta
 from decimal import Decimal
@@ -13,7 +14,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Avg, Case, Count, IntegerField, Q, Sum, When
 from django.db.models.functions import TruncDate
-from django.http import HttpResponse
+from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -209,6 +210,27 @@ class MyPurchaseDetailView(APIView):
         if not purchase:
             return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(PurchaseSerializer(purchase, context={"request": request}).data)
+
+
+def paid_image_response(storage_name, storage):
+    if not storage_name or not storage.exists(storage_name):
+        raise Http404("Paid package image not found.")
+    content_type = mimetypes.guess_type(storage_name)[0] or "application/octet-stream"
+    response = FileResponse(storage.open(storage_name, "rb"), content_type=content_type)
+    response["Cache-Control"] = "private, max-age=300"
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Disposition"] = 'inline; filename="paid-package-image"'
+    return response
+
+
+class MyPurchasePaidImageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        purchase = request.user.purchases.select_related("package").filter(pk=pk, paid_at__isnull=False).first()
+        if not purchase:
+            raise Http404("Purchase not found.")
+        return paid_image_response(purchase.paid_image_snapshot, purchase.package.paid_image.storage)
 
 
 class PaymentAttemptView(APIView):
@@ -816,6 +838,12 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = Package.objects.filter(deleted_at__isnull=True)
     serializer_class = PackageSerializer
     permission_classes = [IsProductOwner]
+
+    @action(detail=True, methods=["get"], url_path="paid-image")
+    def paid_image(self, request, pk=None):
+        package = self.get_object()
+        image = package.paid_image_optimized or package.paid_image
+        return paid_image_response(image.name if image else "", package.paid_image.storage)
 
     def destroy(self, request, *args, **kwargs):
         package = self.get_object()

@@ -53,16 +53,29 @@ class PackageSerializer(serializers.ModelSerializer):
         if instance.image:
             from .image_services import optimize_package_image
             optimize_package_image(instance)
+        if instance.paid_image:
+            from .image_services import optimize_paid_package_image
+            optimize_paid_package_image(instance)
         return instance
 
     def update(self, instance, validated_data):
         image_changed = "image" in validated_data
+        paid_image_changed = "paid_image" in validated_data
         instance = super().update(instance, validated_data)
         if image_changed:
             from .image_services import optimize_package_image
             optimize_package_image(instance)
+        if paid_image_changed:
+            from .image_services import optimize_paid_package_image
+            optimize_paid_package_image(instance)
+            paid_image = instance.paid_image_optimized or instance.paid_image
+            if paid_image:
+                Purchase.objects.filter(
+                    package=instance, paid_at__isnull=False, paid_image_snapshot=""
+                ).update(paid_image_snapshot=paid_image.name)
         return instance
     image_url = serializers.SerializerMethodField()
+    paid_image_url = serializers.SerializerMethodField()
     is_open = serializers.ReadOnlyField()
 
     class Meta:
@@ -70,11 +83,13 @@ class PackageSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "slug", "package_type", "description", "price", "currency",
             "win_probability", "closes_at", "betslip_link", "code", "access_label",
-            "benefits", "image", "image_url", "is_featured", "display_order",
+            "benefits", "image", "image_url", "paid_image", "paid_image_url",
+            "is_featured", "display_order",
             "is_active", "is_open", "created_at", "updated_at",
         ]
         extra_kwargs = {
             "image": {"write_only": True, "required": False},
+            "paid_image": {"write_only": True, "required": False},
             "package_type": {"required": True},
             "betslip_link": {"required": True, "allow_blank": False},
             "code": {"required": True, "allow_blank": False},
@@ -83,6 +98,13 @@ class PackageSerializer(serializers.ModelSerializer):
 
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
+
+    def get_paid_image_url(self, obj):
+        if not (obj.paid_image_optimized or obj.paid_image):
+            return ""
+        request = self.context.get("request")
+        path = f"/api/v1/owner/packages/{obj.pk}/paid-image/"
+        return request.build_absolute_uri(path) if request else path
 
     def validate(self, attrs):
         currency = str(attrs.get("currency", getattr(self.instance, "currency", "UGX"))).upper()
@@ -161,6 +183,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
     status = serializers.ReadOnlyField()
     code = serializers.SerializerMethodField()
     betslip_link = serializers.SerializerMethodField()
+    paid_image_url = serializers.SerializerMethodField()
     latest_payment = serializers.SerializerMethodField()
 
     class Meta:
@@ -168,7 +191,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
         fields = [
             "id", "user", "package", "price_snapshot", "currency_snapshot",
             "initiated_at", "paid_at", "updated_at", "is_paid", "status", "code",
-            "betslip_link", "latest_payment", "payment_timeline", "access_history",
+            "betslip_link", "paid_image_url", "latest_payment", "payment_timeline", "access_history",
         ]
         read_only_fields = fields
 
@@ -183,6 +206,13 @@ class PurchaseSerializer(serializers.ModelSerializer):
 
     def get_betslip_link(self, obj):
         return obj.link_snapshot if self._can_view_secret(obj) else ""
+
+    def get_paid_image_url(self, obj):
+        if not self._can_view_secret(obj) or not obj.paid_image_snapshot:
+            return ""
+        request = self.context.get("request")
+        path = f"/api/v1/me/purchases/{obj.pk}/paid-image/"
+        return request.build_absolute_uri(path) if request else path
 
     def get_latest_payment(self, obj):
         payments = list(obj.payments.all())

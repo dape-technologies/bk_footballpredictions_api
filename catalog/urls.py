@@ -4,6 +4,7 @@ from .operations_views import TelemetryView, OperationsReportView, BetslipAccess
 
 from .views import (
     MyPurchaseDetailView,
+    MyPurchasePaidImageView,
     MyPurchasesView,
     OwnerActivityViewSet,
     OwnerCustomerViewSet,
@@ -62,6 +63,7 @@ urlpatterns = [
     path("", include(public_router.urls)),
     path("me/purchases/", MyPurchasesView.as_view(), name="my-purchases"),
     path("me/purchases/<int:pk>/", MyPurchaseDetailView.as_view(), name="my-purchase-detail"),
+    path("me/purchases/<int:pk>/paid-image/", MyPurchasePaidImageView.as_view(), name="my-purchase-paid-image"),
     path("me/purchases/<int:pk>/payment-attempts/", PaymentAttemptView.as_view(), name="payment-attempt"),
     path("me/payments/<int:pk>/refresh/", PaymentRefreshView.as_view(), name="payment-refresh"),
     path("me/payments/<int:pk>/receipt/", PaymentReceiptView.as_view(), name="payment-receipt"),

@@ -406,6 +406,77 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(response.data["code"], "BK-DAY-78")
         self.assertEqual(response.data["betslip_link"], "https://example.com/slips/daily-edge")
 
+    def test_paid_package_image_is_private_and_unlocks_after_payment(self):
+        from io import BytesIO
+        from tempfile import TemporaryDirectory
+
+        from django.core.files.base import ContentFile
+        from PIL import Image
+
+        with TemporaryDirectory() as folder, override_settings(PRIVATE_MEDIA_ROOT=folder):
+            image = BytesIO()
+            Image.new("RGB", (800, 1100), "navy").save(image, "PNG")
+            self.package.paid_image.save("member-betslip.png", ContentFile(image.getvalue()), save=True)
+
+            public = self.client.get("/api/v1/packages/")
+            self.assertNotIn("paid_image", public.data[0])
+            self.assertNotIn("paid_image_url", public.data[0])
+
+            purchase = self.create_purchase()
+            unpaid = self.client.get(f"/api/v1/me/purchases/{purchase.id}/")
+            self.assertEqual(unpaid.data["paid_image_url"], "")
+            self.assertEqual(self.client.get(f"/api/v1/me/purchases/{purchase.id}/paid-image/").status_code, 404)
+
+            _, payment = self.start_payment(purchase=purchase)
+            self.assertEqual(self.signed_webhook(payment).status_code, 200)
+            purchase.refresh_from_db()
+            self.assertEqual(purchase.paid_image_snapshot, self.package.paid_image.name)
+
+            paid = self.client.get(f"/api/v1/me/purchases/{purchase.id}/")
+            self.assertTrue(paid.data["paid_image_url"].endswith(f"/api/v1/me/purchases/{purchase.id}/paid-image/"))
+            own_image = self.client.get(f"/api/v1/me/purchases/{purchase.id}/paid-image/")
+            self.assertEqual(own_image.status_code, 200)
+            self.assertTrue(own_image["Content-Type"].startswith("image/"))
+            self.assertEqual(own_image["Cache-Control"], "private, max-age=300")
+            own_image.close()
+
+            self.client.force_login(self.other)
+            self.assertEqual(self.client.get(f"/api/v1/me/purchases/{purchase.id}/paid-image/").status_code, 404)
+
+            self.client.force_login(self.owner)
+            owner_image = self.client.get(f"/api/v1/owner/packages/{self.package.id}/paid-image/")
+            self.assertEqual(owner_image.status_code, 200)
+            owner_image.close()
+
+    def test_owner_upload_backfills_paid_customers_without_an_image_snapshot(self):
+        from io import BytesIO
+        from tempfile import TemporaryDirectory
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from PIL import Image
+
+        purchase, payment = self.start_payment()
+        self.assertEqual(self.signed_webhook(payment).status_code, 200)
+        purchase.refresh_from_db()
+        self.assertEqual(purchase.paid_image_snapshot, "")
+
+        with TemporaryDirectory() as folder, override_settings(PRIVATE_MEDIA_ROOT=folder):
+            image = BytesIO()
+            Image.new("RGB", (900, 1200), "green").save(image, "PNG")
+            upload = SimpleUploadedFile("paid-slip.png", image.getvalue(), content_type="image/png")
+            self.client.force_login(self.owner)
+            response = self.client.patch(
+                f"/api/v1/owner/packages/{self.package.id}/",
+                {"paid_image": upload},
+                format="multipart",
+            )
+
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertTrue(response.data["paid_image_url"].endswith(f"/api/v1/owner/packages/{self.package.id}/paid-image/"))
+            purchase.refresh_from_db()
+            self.assertTrue(purchase.paid_image_snapshot)
+            self.assertNotIn("paid-slip", purchase.paid_image_snapshot)
+
     def test_user_cannot_read_another_users_purchase(self):
         purchase = self.create_purchase()
         self.client.force_login(self.other)

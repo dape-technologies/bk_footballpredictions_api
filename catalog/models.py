@@ -1,13 +1,25 @@
 from uuid import uuid4
+from pathlib import Path
 
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
+from .storage import PrivatePackageStorage
+
+
+def paid_package_image_upload_to(instance, filename):
+    suffix = Path(filename).suffix.lower()[:10]
+    return f"packages/paid/{uuid4().hex}{suffix}"
+
 
 class Package(models.Model):
     image_optimized = models.ImageField(upload_to="packages/optimized/", blank=True, null=True, editable=False)
+    paid_image_optimized = models.ImageField(
+        storage=PrivatePackageStorage(), upload_to="packages/paid/optimized/",
+        blank=True, null=True, editable=False,
+    )
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=120, unique=True)
     package_type = models.CharField(max_length=80, default="Accumulator")
@@ -24,6 +36,10 @@ class Package(models.Model):
     access_label = models.CharField(max_length=80, default="Premium predictions")
     benefits = models.JSONField(default=list, blank=True)
     image = models.ImageField(upload_to="packages/", blank=True, null=True)
+    paid_image = models.ImageField(
+        storage=PrivatePackageStorage(), upload_to=paid_package_image_upload_to,
+        blank=True, null=True,
+    )
     is_active = models.BooleanField(default=True)
     is_featured = models.BooleanField(default=False)
     display_order = models.PositiveIntegerField(default=0)
@@ -49,6 +65,7 @@ class Purchase(models.Model):
     currency_snapshot = models.CharField(max_length=8, default="UGX")
     code_snapshot = models.CharField(max_length=120, blank=True)
     link_snapshot = models.URLField(max_length=500, blank=True)
+    paid_image_snapshot = models.CharField(max_length=500, blank=True)
     initiated_at = models.DateTimeField(auto_now_add=True)
     paid_at = models.DateTimeField(blank=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -77,7 +94,9 @@ class Purchase(models.Model):
         self.paid_at = paid_at or timezone.now()
         self.code_snapshot = self.package.code
         self.link_snapshot = self.package.betslip_link
-        self.save(update_fields=["paid_at", "code_snapshot", "link_snapshot", "updated_at"])
+        paid_image = self.package.paid_image_optimized or self.package.paid_image
+        self.paid_image_snapshot = paid_image.name if paid_image else ""
+        self.save(update_fields=["paid_at", "code_snapshot", "link_snapshot", "paid_image_snapshot", "updated_at"])
         return True
 
     def __str__(self):

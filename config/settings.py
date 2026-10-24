@@ -108,6 +108,7 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+PRIVATE_MEDIA_ROOT = Path(os.getenv("PRIVATE_MEDIA_ROOT", BASE_DIR / "private_media"))
 FRONTEND_DIST_DIR = Path(os.getenv("FRONTEND_DIST_DIR", BASE_DIR / "frontend_dist"))
 WHITENOISE_ROOT = FRONTEND_DIST_DIR
 SERVE_MEDIA_FILES = env_bool("DJANGO_SERVE_MEDIA", False)

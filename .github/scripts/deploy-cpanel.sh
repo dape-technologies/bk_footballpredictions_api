@@ -60,6 +60,7 @@ rsync -a --delete \
   --exclude='.production-env' \
   --exclude='frontend_dist/' \
   --exclude='media/' \
+  --exclude='private_media/' \
   --exclude='staticfiles/' \
   --exclude='tmp/' \
   --exclude='*.log' \

@@ -8,6 +8,7 @@ class PackageAdmin(admin.ModelAdmin):
     list_display = ["name", "package_type", "price", "closes_at", "is_active", "is_open", "win_probability", "code"]
     list_filter = ["is_active", "package_type", "closes_at"]
     search_fields = ["name", "code", "betslip_link"]
+    readonly_fields = ["image_optimized", "paid_image_optimized"]
 
 
 @admin.register(Purchase)
@@ -15,7 +16,7 @@ class PurchaseAdmin(admin.ModelAdmin):
     list_display = ["user", "package", "price_snapshot", "currency_snapshot", "paid_at", "initiated_at"]
     list_filter = ["currency_snapshot", "paid_at", "initiated_at"]
     search_fields = ["user__phone", "package__name", "code_snapshot"]
-    readonly_fields = ["initiated_at", "updated_at"]
+    readonly_fields = ["code_snapshot", "link_snapshot", "paid_image_snapshot", "initiated_at", "updated_at"]
 
 
 admin.site.register([Prediction, Testimonial])
