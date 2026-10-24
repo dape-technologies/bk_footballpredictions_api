@@ -38,7 +38,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_url(self, obj):
-        return media_url(self.context.get("request"), obj.image)
+        return media_url(self.context.get("request"), obj.image_optimized or obj.image)
 
     def get_payment_total(self, obj):
         return payment_quote(obj.price)["total_charge"]
@@ -48,6 +48,20 @@ class PublicPackageSerializer(serializers.ModelSerializer):
 
 
 class PackageSerializer(serializers.ModelSerializer):
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        if instance.image:
+            from .image_services import optimize_package_image
+            optimize_package_image(instance)
+        return instance
+
+    def update(self, instance, validated_data):
+        image_changed = "image" in validated_data
+        instance = super().update(instance, validated_data)
+        if image_changed:
+            from .image_services import optimize_package_image
+            optimize_package_image(instance)
+        return instance
     image_url = serializers.SerializerMethodField()
     is_open = serializers.ReadOnlyField()
 
@@ -139,6 +153,8 @@ class PaymentDetailSerializer(PaymentSerializer):
 
 
 class PurchaseSerializer(serializers.ModelSerializer):
+    access_history = serializers.SerializerMethodField()
+    payment_timeline = serializers.SerializerMethodField()
     package = PublicPackageSerializer(read_only=True)
     user = UserSerializer(read_only=True)
     is_paid = serializers.ReadOnlyField()
@@ -152,7 +168,7 @@ class PurchaseSerializer(serializers.ModelSerializer):
         fields = [
             "id", "user", "package", "price_snapshot", "currency_snapshot",
             "initiated_at", "paid_at", "updated_at", "is_paid", "status", "code",
-            "betslip_link", "latest_payment",
+            "betslip_link", "latest_payment", "payment_timeline", "access_history",
         ]
         read_only_fields = fields
 
@@ -172,6 +188,17 @@ class PurchaseSerializer(serializers.ModelSerializer):
         payments = list(obj.payments.all())
         payment = max(payments, key=lambda item: (item.created_at, item.id)) if payments else None
         return PaymentSerializer(payment, context=self.context).data if payment else None
+
+    def get_payment_timeline(self, obj):
+        return [{"reference": payment.reference, "status": payment.status,
+                 "created_at": payment.created_at, "submitted_at": payment.submitted_at,
+                 "confirmed_at": payment.confirmed_at, "failed_at": payment.failed_at,
+                 "failure_reason": payment.failure_reason}
+                for payment in obj.payments.all()]
+
+    def get_access_history(self, obj):
+        from .models import JourneyEvent
+        return list(JourneyEvent.objects.filter(purchase=obj, user=obj.user, kind="betslip_access").order_by("-created_at").values_list("created_at", flat=True)[:20])
 
 
 class PurchaseCreateSerializer(serializers.Serializer):

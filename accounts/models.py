@@ -7,6 +7,7 @@ from .managers import UserManager
 
 
 class User(AbstractUser):
+    notification_preferences = models.JSONField(default=dict, blank=True)
     username = None
     phone = models.CharField(max_length=20, unique=True)
     date_of_birth = models.DateField(blank=True, null=True)
@@ -75,3 +76,42 @@ class ActivityLog(models.Model):
 
     def __str__(self):
         return f"{self.action} · {self.description}"
+
+
+class SecurityChallenge(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    purpose = models.CharField(max_length=30)
+    session_digest = models.CharField(max_length=64)
+    binding = models.CharField(max_length=160)
+    code_hash = models.CharField(max_length=128)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class PrivilegedSession(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="privileged_sessions")
+    session_digest = models.CharField(max_length=64, unique=True)
+    device = models.CharField(max_length=300, blank=True)
+    ip_address = models.GenericIPAddressField(null=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now_add=True)
+    revoked_at = models.DateTimeField(null=True)
+
+
+class RecoveryCode(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    digest = models.CharField(max_length=64)
+    used_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class EmailNotice(models.Model):
+    dedup_key = models.CharField(max_length=180, unique=True)
+    recipients = models.JSONField(default=list)
+    subject = models.CharField(max_length=180)
+    body = models.TextField()
+    sent_at = models.DateTimeField(null=True)
+    attempts = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)

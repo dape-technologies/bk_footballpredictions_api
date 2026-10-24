@@ -1,5 +1,6 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+from .operations_views import TelemetryView, OperationsReportView, BetslipAccessView, CustomerPreferencesView
 
 from .views import (
     MyPurchaseDetailView,
@@ -30,6 +31,7 @@ from .views import (
     DeveloperPayoutRequestView,
     DeveloperPayoutCancelView,
     DeveloperAnalyticsView,
+    DeveloperCustomerViewSet,
     DeveloperPaymentGatewayView,
     DeveloperPaymentGatewayCheckView,
 )
@@ -49,8 +51,14 @@ owner_router.register("recent-wins", OwnerRecentWinViewSet, basename="owner-rece
 owner_router.register("testimonials", OwnerTestimonialViewSet, basename="owner-testimonial")
 owner_router.register("customers", OwnerCustomerViewSet, basename="owner-customer")
 owner_router.register("activities", OwnerActivityViewSet, basename="owner-activity")
+developer_router = DefaultRouter()
+developer_router.register("users", DeveloperCustomerViewSet, basename="developer-user")
 
 urlpatterns = [
+    path("telemetry/", TelemetryView.as_view()),
+    path("operations/report/", OperationsReportView.as_view()),
+    path("me/preferences/", CustomerPreferencesView.as_view()),
+    path("me/purchases/<int:pk>/access/", BetslipAccessView.as_view()),
     path("", include(public_router.urls)),
     path("me/purchases/", MyPurchasesView.as_view(), name="my-purchases"),
     path("me/purchases/<int:pk>/", MyPurchaseDetailView.as_view(), name="my-purchase-detail"),
@@ -71,4 +79,5 @@ urlpatterns = [
     path("developer/payment-gateway/", DeveloperPaymentGatewayView.as_view(), name="developer-payment-gateway"),
     path("developer/payment-gateway/relworx/check/", DeveloperPaymentGatewayCheckView.as_view(), name="developer-payment-gateway-check"),
     path("owner/", include(owner_router.urls)),
+    path("developer/", include(developer_router.urls)),
 ]

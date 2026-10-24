@@ -157,6 +157,8 @@ def apply_relworx_result(payment, payload, *, source):
         accrue_payment(payment)
         payment.alerts.filter(resolved_at__isnull=True).update(resolved_at=now)
         record_payment_event(payment, "payment.confirmed", source=source, payload=payload)
+        from .analytics_services import record_confirmation
+        record_confirmation(payment)
         return payment
 
     if provider_status in {"failed", "failure", "declined", "cancelled", "canceled"}:

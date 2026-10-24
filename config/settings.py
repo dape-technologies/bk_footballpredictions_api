@@ -44,6 +44,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "accounts.middleware.PrivilegedSessionTimeoutMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -166,6 +167,18 @@ RELWORX_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("RELWORX_WEBHOOK_TOLERANCE_SEC
 RELWORX_REQUEST_TIMEOUT_SECONDS = int(os.getenv("RELWORX_REQUEST_TIMEOUT_SECONDS", "15"))
 RELWORX_COLLECTION_FEE_RATE = Decimal(os.getenv("RELWORX_COLLECTION_FEE_RATE", "0.03"))
 RELWORX_PAYOUTS_ENABLED = env_bool("RELWORX_PAYOUTS_ENABLED", False)
+PAYOUT_EMAIL_OTP_REQUIRED = env_bool("PAYOUT_EMAIL_OTP_REQUIRED", True)
+OWNER_SECURITY_EMAIL = os.getenv("OWNER_SECURITY_EMAIL", "makubuyahannington93@gmail.com")
+DEVELOPER_SECURITY_EMAIL = os.getenv("DEVELOPER_SECURITY_EMAIL", "dapetech.2@gmail.com")
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", False)
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
+EMAIL_TIMEOUT = 15
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "security@bkfootballpredictions.com")
 RELWORX_PAYOUT_MIN_AMOUNT = Decimal(os.getenv("RELWORX_PAYOUT_MIN_AMOUNT", "500"))
 RELWORX_PAYOUT_MAX_AMOUNT = Decimal(os.getenv("RELWORX_PAYOUT_MAX_AMOUNT", "5000000"))
 PAYOUT_EXECUTION_MODE = os.getenv("PAYOUT_EXECUTION_MODE", "request_only")

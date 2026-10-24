@@ -27,6 +27,7 @@ from accounts.models import ActivityLog, User
 from accounts.permissions import IsDeveloper, IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
+from accounts.throttles import PayoutRateThrottle
 from .models import Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial
 from .payment_pricing import payment_quote
 from .payment_services import (
@@ -193,6 +194,8 @@ class MyPurchasesView(APIView):
             target=purchase,
         )
         purchase = Purchase.objects.select_related("package", "user").prefetch_related("payments__package", "payments__user").get(pk=purchase.pk)
+        from .analytics_services import record_journey
+        record_journey(request, "checkout_open", purchase.package, purchase)
         response_status = status.HTTP_201_CREATED if getattr(serializer, "was_created", False) else status.HTTP_200_OK
         return Response(PurchaseSerializer(purchase, context={"request": request}).data, status=response_status)
 
@@ -290,6 +293,8 @@ class PaymentAttemptView(APIView):
         payment.provider_message = str(provider_response.get("message", "Payment request sent."))[:240]
         payment.save(update_fields=["internal_reference", "status", "provider_message", "updated_at"])
         record_payment_event(payment, "payment.pending", source="checkout", message=payment.provider_message, payload=provider_response)
+        from .analytics_services import record_journey
+        record_journey(request, "prompt_sent", payment.package, payment.purchase, event_id=f"prompt-{payment.pk}")
         record_activity(
             request,
             category=ActivityLog.Category.SUBSCRIPTION,
@@ -450,7 +455,12 @@ class WalletView(APIView):
     permission_classes = [IsProductOwner]
 
     def get(self, request):
-        return Response(wallet_payload(self.beneficiary, request.user))
+        payload = wallet_payload(self.beneficiary, request.user)
+        try:
+            payload["provider_balance"] = check_wallet_balance().get("balance")
+        except RelworxError:
+            payload["provider_balance"] = None
+        return Response(payload)
 
 
 class OwnerWalletView(WalletView):
@@ -463,7 +473,34 @@ class DeveloperWalletView(WalletView):
 
 
 class PayoutRequestView(WalletView):
+    throttle_classes = [PayoutRateThrottle]
     def post(self, request):
+        token = request.data.get("request_token")
+        if token:
+            existing = PayoutRequest.objects.filter(client_token=token, requested_by=request.user, beneficiary=self.beneficiary).first()
+            if existing:
+                try:
+                    same_amount = existing.amount == Decimal(str(request.data.get("amount")))
+                except Exception:
+                    same_amount = False
+                if not same_amount:
+                    return Response({"detail": "This request token belongs to a different withdrawal amount."}, status=409)
+                return Response({"message": "Existing payout request retrieved.", "request": serialize_payout(existing), **wallet_payload(self.beneficiary, request.user)}, status=200)
+        from .wallet_services import wallet_account
+        if wallet_account(self.beneficiary).payouts_frozen:
+            return Response({"detail": "Wallet frozen please contact your developer."}, status=423)
+        if settings.PAYOUT_EMAIL_OTP_REQUIRED:
+            from accounts.payout_security import issue_code, verify_code
+            if request.data.get("request_otp") is True:
+                try:
+                    issue_code(request)
+                except Exception as error:
+                    from rest_framework.exceptions import ValidationError
+                    if isinstance(error, ValidationError):
+                        raise
+                    return Response({"detail": "Verification email could not be sent. No payout was created."}, status=503)
+                return Response({"message": "Withdrawal verification code sent to the security email addresses."})
+            verify_code(request)
         try:
             payout = create_payout(
                 self.beneficiary, request.data.get("amount"), request.user,
@@ -475,7 +512,7 @@ class PayoutRequestView(WalletView):
         if settings.PAYOUT_EXECUTION_MODE == "immediate":
             payout = execute_payout(payout.pk)
         return Response({
-            "message": "Payout submitted to Relworx." if payout.status == PayoutRequest.Status.PROCESSING else "Payout request reserved.",
+            "message": "Payout submitted to Relworx." if payout.status == PayoutRequest.Status.PROCESSING else (payout.failure_reason if payout.status == PayoutRequest.Status.FAILED else "Payout request reserved."),
             "request": serialize_payout(payout),
             **wallet_payload(self.beneficiary, request.user),
         }, status=status.HTTP_201_CREATED)
@@ -687,9 +724,22 @@ class DeveloperAnalyticsView(APIView):
 class DeveloperPaymentGatewayView(APIView):
     permission_classes = [IsDeveloper]
 
+    def patch(self, request):
+        from .wallet_services import wallet_account
+        if not isinstance(request.data.get("owner_payouts_frozen"), bool):
+            return Response({"detail": "A boolean owner_payouts_frozen is required."}, status=400)
+        account = wallet_account("owner")
+        account.payouts_frozen = request.data["owner_payouts_frozen"]
+        account.save(update_fields=["payouts_frozen"])
+        record_activity(request, category=ActivityLog.Category.ADMINISTRATION,
+                        action="wallet.freeze_changed", description=f"Owner payout freeze set to {account.payouts_frozen}.")
+        return self.get(request)
+
     def get(self, request):
+        from .wallet_services import wallet_account
         configured = bool(settings.RELWORX_API_KEY and settings.RELWORX_ACCOUNT_NO)
         return Response({
+            "owner_payouts_frozen": wallet_account("owner").payouts_frozen,
             "active_provider": "relworx",
             "provider": {
                 "name": "Relworx",
@@ -729,7 +779,7 @@ class OwnerDashboardView(APIView):
     def get(self, request):
         now = timezone.now()
         return Response({
-            "customers": User.objects.filter(is_staff=False).count(),
+            "customers": User.objects.filter(is_staff=False, is_superuser=False).exclude(groups__name__in=["Developer", "Product Owner"]).count(),
             "active_packages": Package.objects.filter(
                 deleted_at__isnull=True,
                 is_active=True,
@@ -946,13 +996,15 @@ class OwnerTestimonialViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
 
 
 class OwnerCustomerViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = User.objects.filter(is_staff=False).order_by("-created_at")
+    queryset = User.objects.filter(is_staff=False, is_superuser=False).exclude(groups__name__in=["Developer", "Product Owner"]).order_by("-created_at")
     serializer_class = UserSerializer
     permission_classes = [IsProductOwner]
 
     @action(detail=True, methods=["post"])
     def block(self, request, pk=None):
         customer = self.get_object()
+        if customer.is_product_owner or customer.is_developer or customer.pk == request.user.pk:
+            return Response({"detail": "Privileged accounts cannot be blocked here."}, status=403)
         customer.is_blocked = bool(request.data.get("blocked", True))
         customer.is_active = not customer.is_blocked
         customer.save(update_fields=["is_blocked", "is_active", "updated_at"])
@@ -965,3 +1017,15 @@ class OwnerCustomerViewSet(viewsets.ReadOnlyModelViewSet):
             target=customer,
         )
         return Response(self.get_serializer(customer).data)
+
+
+class DeveloperCustomerViewSet(OwnerCustomerViewSet):
+    queryset = User.objects.all().order_by("-created_at")
+    permission_classes = [IsDeveloper]
+
+    @action(detail=True, methods=["post"])
+    def block(self, request, pk=None):
+        customer = self.get_object()
+        if customer.pk == request.user.pk or customer.is_superuser or customer.is_developer or customer.is_product_owner:
+            return Response({"detail": "Privileged accounts cannot be blocked here."}, status=403)
+        return super().block(request, pk)

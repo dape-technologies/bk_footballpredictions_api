@@ -26,6 +26,6 @@ def record_activity(
         description=description,
         target_type=target._meta.label if target is not None else "",
         target_id=str(target.pk) if target is not None and target.pk is not None else "",
-        metadata=metadata or {},
+        metadata={"device": request.META.get("HTTP_USER_AGENT", "")[:300], **(metadata or {})},
         ip_address=client_ip(request),
     )

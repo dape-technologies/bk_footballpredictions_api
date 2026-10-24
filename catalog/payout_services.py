@@ -25,6 +25,8 @@ def settle_payout(payout_id, provider_status, payload=None):
         internal = str(payload.get("internal_reference") or payout.provider_request_id or "")[:200]
         transaction_id = str(payload.get("provider_transaction_id") or payout.transaction_id or "")[:200]
         fee = _decimal(payload.get("charge"))
+        if provider_status == "success" and fee is None:
+            fee = Decimal("1500")
         completed = parse_datetime(str(payload.get("completed_at") or "")) or timezone.now()
         if provider_status == "success":
             reservation = WalletLedgerEntry.objects.filter(idempotency_key=f"payout:{payout.pk}:reserve").first()
@@ -61,6 +63,9 @@ def settle_payout(payout_id, provider_status, payload=None):
 
 
 def execute_payout(payout_id):
+    candidate = PayoutRequest.objects.select_related("wallet_account").get(pk=payout_id)
+    if candidate.wallet_account.payouts_frozen and candidate.status == PayoutRequest.Status.PENDING:
+        return settle_payout(candidate.pk, "failed", {"message": "Wallet frozen please contact your developer."})
     claimed = PayoutRequest.objects.filter(pk=payout_id, status=PayoutRequest.Status.PENDING).update(
         status=PayoutRequest.Status.PROCESSING, failure_reason="", reconciliation_next_at=timezone.now() + timedelta(minutes=2),
     )

@@ -9,6 +9,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from .models import Payment, PayoutRequest, WalletAccount, WalletLedgerEntry
+from .relworx import check_wallet_balance, RelworxError
 
 
 def wallet_account(beneficiary, provider="relworx", currency="UGX"):
@@ -56,6 +57,7 @@ def wallet_summary(beneficiary):
     entries = account.entries.all()
     credited = entries.filter(entry_type__in=[WalletLedgerEntry.Type.PAYMENT_CREDIT, WalletLedgerEntry.Type.COMMISSION_CREDIT]).aggregate(total=Sum("amount"))["total"] or 0
     available = entries.aggregate(total=Sum("amount"))["total"] or 0
+    available -= account.payout_requests.filter(status__in=["pending", "processing"]).count() * Decimal("1500")
     reserved = account.payout_requests.filter(status__in=[PayoutRequest.Status.PENDING, PayoutRequest.Status.PROCESSING]).aggregate(total=Sum("amount"))["total"] or 0
     today = entries.filter(
         entry_type__in=[WalletLedgerEntry.Type.PAYMENT_CREDIT, WalletLedgerEntry.Type.COMMISSION_CREDIT],
@@ -69,7 +71,7 @@ def wallet_summary(beneficiary):
 
 
 def _destination(beneficiary):
-    value = settings.PAYMENT_OWNER_PAYOUT_MSISDN if beneficiary == "owner" else settings.PAYMENT_DEVELOPER_PAYOUT_MSISDN
+    value = wallet_account(beneficiary).destination_msisdn or (settings.PAYMENT_OWNER_PAYOUT_MSISDN if beneficiary == "owner" else settings.PAYMENT_DEVELOPER_PAYOUT_MSISDN)
     digits = re.sub(r"\D", "", value or "")
     if digits.startswith("0") and len(digits) == 10:
         digits = f"256{digits[1:]}"
@@ -82,6 +84,8 @@ def create_payout(beneficiary, amount, actor, client_token=None):
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValidationError({"amount": "Enter a valid payout amount."}) from error
     destination = _destination(beneficiary)
+    if not amount.is_finite() or amount <= 0:
+        raise ValidationError({"amount": "Enter a positive finite amount."})
     if not destination:
         raise ValidationError({"amount": f"{beneficiary.title()} payout destination is not configured on the server."})
     token = str(client_token or uuid4())
@@ -91,12 +95,30 @@ def create_payout(beneficiary, amount, actor, client_token=None):
             if existing.beneficiary != beneficiary or existing.requested_by_id != actor.pk:
                 raise ValidationError({"request_token": "This payout request token is already in use."})
             return existing
-        account = WalletAccount.objects.select_for_update().get(pk=wallet_account(beneficiary).pk)
+        wallet_account("owner")
+        wallet_account("developer")
+        locked_accounts = list(WalletAccount.objects.select_for_update().filter(provider="relworx", currency="UGX").order_by("pk"))
+        account = next(item for item in locked_accounts if item.beneficiary == beneficiary)
+        if account.payouts_frozen:
+            raise ValidationError({"amount": "Wallet frozen please contact your developer."})
         available = account.entries.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        available -= account.payout_requests.filter(status__in=["pending", "processing"]).count() * Decimal("1500")
         if amount < settings.RELWORX_PAYOUT_MIN_AMOUNT:
             raise ValidationError({"amount": f"The minimum Relworx payout is {settings.RELWORX_PAYOUT_MIN_AMOUNT:,.0f} UGX."})
         if amount > settings.RELWORX_PAYOUT_MAX_AMOUNT:
             raise ValidationError({"amount": f"The maximum Relworx payout is {settings.RELWORX_PAYOUT_MAX_AMOUNT:,.0f} UGX."})
+        fee_buffer = Decimal("1500")
+        if amount + fee_buffer > available:
+            raise ValidationError({"amount": "Leave UGX 1,500 available for the withdrawal fee."})
+        if settings.PAYOUT_EXECUTION_MODE == "immediate":
+            try:
+                provider_balance = Decimal(str(check_wallet_balance().get("balance", 0)))
+                outstanding = PayoutRequest.objects.filter(status__in=["pending", "processing"])
+                provider_balance -= (outstanding.aggregate(total=Sum("amount"))["total"] or Decimal("0")) + outstanding.count() * fee_buffer
+            except (RelworxError, InvalidOperation, TypeError, ValueError) as error:
+                raise ValidationError({"amount": "Provider balance could not be verified. Please try again."}) from error
+            if amount + fee_buffer > provider_balance:
+                raise ValidationError({"amount": "Relworx balance is insufficient for this payout plus the UGX 1,500 withdrawal fee."})
         if amount > available:
             raise ValidationError({"amount": f"Payout exceeds the available balance of {max(Decimal('0'), available):,.2f} UGX."})
         payout = PayoutRequest.objects.create(
@@ -154,7 +176,11 @@ def wallet_payload(beneficiary, actor=None):
     account = wallet_account(beneficiary)
     return {
         "wallet": wallet_summary(beneficiary),
+        "payouts_frozen": account.payouts_frozen,
+        "withdrawal_fee_buffer": Decimal("1500"),
+        "minimum_operating_balance": Decimal("1500"),
         "destination_configured": bool(_destination(beneficiary)),
+        "destination": mask_msisdn(_destination(beneficiary)),
         "execution_mode": settings.PAYOUT_EXECUTION_MODE,
         "payouts_enabled": settings.RELWORX_PAYOUTS_ENABLED,
         "minimum_payout": settings.RELWORX_PAYOUT_MIN_AMOUNT,

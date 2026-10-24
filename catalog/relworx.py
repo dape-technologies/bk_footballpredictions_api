@@ -118,6 +118,8 @@ def check_mobile_money_payout(payout):
 
 
 def check_wallet_balance(currency="UGX"):
+    if not settings.RELWORX_API_KEY or not settings.RELWORX_ACCOUNT_NO:
+        raise RelworxError("Relworx balance is not configured.")
     query = urlencode({"account_no": settings.RELWORX_ACCOUNT_NO, "currency": currency})
     url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-wallet-balance?{query}"
     result = _authenticated_request(url)

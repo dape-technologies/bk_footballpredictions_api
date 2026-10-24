@@ -7,6 +7,7 @@ from django.utils import timezone
 
 
 class Package(models.Model):
+    image_optimized = models.ImageField(upload_to="packages/optimized/", blank=True, null=True, editable=False)
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=120, unique=True)
     package_type = models.CharField(max_length=80, default="Accumulator")
@@ -218,6 +219,8 @@ def payout_reference():
 
 
 class WalletAccount(models.Model):
+    destination_msisdn = models.CharField(max_length=30, blank=True)
+    payouts_frozen = models.BooleanField(default=False)
     class Beneficiary(models.TextChoices):
         OWNER = "owner", "Owner"
         DEVELOPER = "developer", "Developer"
@@ -233,6 +236,28 @@ class WalletAccount(models.Model):
 
     def __str__(self):
         return f"{self.beneficiary} · {self.provider} · {self.currency}"
+
+
+class JourneyEvent(models.Model):
+    event_id = models.CharField(max_length=64, unique=True)
+    visitor = models.CharField(max_length=64, db_index=True)
+    kind = models.CharField(max_length=30, db_index=True)
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, null=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    purchase = models.ForeignKey(Purchase, on_delete=models.SET_NULL, null=True)
+    device = models.CharField(max_length=12, default="unknown")
+    browser = models.CharField(max_length=20, default="unknown")
+    customer_type = models.CharField(max_length=12, default="new")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class WebVitalSample(models.Model):
+    sample_id = models.CharField(max_length=100, unique=True)
+    metric = models.CharField(max_length=4)
+    value = models.FloatField()
+    device = models.CharField(max_length=12)
+    page = models.CharField(max_length=80)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
 class PayoutRequest(models.Model):
