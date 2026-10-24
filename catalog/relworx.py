@@ -83,3 +83,44 @@ def check_mobile_money_payment(payment):
     if not result.get("success"):
         raise RelworxError(result.get("message") or "The payment status could not be checked.")
     return result
+
+
+def request_mobile_money_payout(payout):
+    if not settings.RELWORX_PAYOUTS_ENABLED:
+        raise RelworxError("Relworx API payouts are not enabled for this account.")
+    if not settings.RELWORX_API_KEY or not settings.RELWORX_ACCOUNT_NO:
+        raise RelworxError("Payouts are temporarily unavailable.")
+    url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/send-payment"
+    payload = {
+        "account_no": settings.RELWORX_ACCOUNT_NO,
+        "reference": payout.reference,
+        "msisdn": payout.destination_msisdn,
+        "currency": payout.currency,
+        "amount": float(payout.amount),
+        "description": f"BK {payout.beneficiary.title()} wallet payout",
+    }
+    result = _authenticated_request(url, data=payload, method="POST")
+    if not result.get("success"):
+        raise RelworxError(result.get("message") or "The payout request was rejected.", payload=result)
+    return result
+
+
+def check_mobile_money_payout(payout):
+    query = urlencode({
+        "internal_reference": payout.provider_request_id or payout.reference,
+        "account_no": settings.RELWORX_ACCOUNT_NO,
+    })
+    url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-request-status?{query}"
+    result = _authenticated_request(url)
+    if not result.get("success"):
+        raise RelworxError(result.get("message") or "The payout status could not be checked.")
+    return result
+
+
+def check_wallet_balance(currency="UGX"):
+    query = urlencode({"account_no": settings.RELWORX_ACCOUNT_NO, "currency": currency})
+    url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-wallet-balance?{query}"
+    result = _authenticated_request(url)
+    if not result.get("success"):
+        raise RelworxError(result.get("message") or "The provider wallet balance is unavailable.")
+    return result

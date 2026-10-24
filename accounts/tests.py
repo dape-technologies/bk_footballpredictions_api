@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import Group
 from django.core.cache import cache
 from django.core.management import call_command
 from django.test import Client, override_settings
@@ -205,6 +206,23 @@ class AuthenticationTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
+        self.assertIn("sessionid", self.client.cookies)
+
+    def test_developer_can_create_a_separate_privileged_session(self):
+        developer = User.objects.create_user(
+            phone="0701112300", first_name="Platform", last_name="Developer",
+            password="strong-pass-27", is_staff=False,
+        )
+        group, _ = Group.objects.get_or_create(name="Developer")
+        developer.groups.add(group)
+        response = self.client.post(
+            reverse("admin-login"),
+            {"phone": developer.phone, "password": "strong-pass-27"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["is_developer"])
+        self.assertFalse(response.data["is_owner"])
         self.assertIn("sessionid", self.client.cookies)
 
     @override_settings(

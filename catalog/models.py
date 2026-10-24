@@ -115,6 +115,10 @@ class Payment(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="payments")
     package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments")
     amount = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
+    base_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    provider_fee_estimate = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    provider_net_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    developer_commission = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     currency = models.CharField(max_length=8, default="UGX")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.CREATED, db_index=True)
     reference = models.CharField(max_length=24, unique=True, default=payment_reference, editable=False)
@@ -207,6 +211,90 @@ class PaymentAlert(models.Model):
 
     def __str__(self):
         return self.title
+
+
+def payout_reference():
+    return f"BK-PAY-{uuid4().hex[:12].upper()}"
+
+
+class WalletAccount(models.Model):
+    class Beneficiary(models.TextChoices):
+        OWNER = "owner", "Owner"
+        DEVELOPER = "developer", "Developer"
+
+    beneficiary = models.CharField(max_length=20, choices=Beneficiary.choices)
+    provider = models.CharField(max_length=30, default="relworx")
+    currency = models.CharField(max_length=8, default="UGX")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["beneficiary", "provider", "currency"], name="unique_wallet_account")]
+
+    def __str__(self):
+        return f"{self.beneficiary} · {self.provider} · {self.currency}"
+
+
+class PayoutRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    reference = models.CharField(max_length=50, unique=True, default=payout_reference, editable=False)
+    client_token = models.CharField(max_length=100, unique=True, blank=True, null=True)
+    wallet_account = models.ForeignKey(WalletAccount, on_delete=models.PROTECT, related_name="payout_requests")
+    beneficiary = models.CharField(max_length=20, choices=WalletAccount.Beneficiary.choices, db_index=True)
+    provider = models.CharField(max_length=30, default="relworx", db_index=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
+    currency = models.CharField(max_length=8, default="UGX")
+    destination_msisdn = models.CharField(max_length=30)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, blank=True, null=True, related_name="payout_requests")
+    provider_request_id = models.CharField(max_length=200, blank=True)
+    transaction_id = models.CharField(max_length=200, blank=True)
+    provider_fee_actual = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    failure_reason = models.TextField(blank=True)
+    reconciliation_next_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    check_attempts = models.PositiveIntegerField(default=0)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.reference} · {self.status}"
+
+
+class WalletLedgerEntry(models.Model):
+    class Type(models.TextChoices):
+        PAYMENT_CREDIT = "payment_credit", "Payment credit"
+        COMMISSION_CREDIT = "commission_credit", "Commission credit"
+        PAYOUT_RESERVATION = "payout_reservation", "Payout reservation"
+        PAYOUT_DEBIT = "payout_debit", "Payout debit"
+        PAYOUT_RELEASE = "payout_release", "Payout release"
+        PAYOUT_FEE = "payout_fee", "Payout fee"
+
+    wallet_account = models.ForeignKey(WalletAccount, on_delete=models.PROTECT, related_name="entries")
+    payment = models.ForeignKey(Payment, on_delete=models.SET_NULL, blank=True, null=True, related_name="wallet_entries")
+    payout_request = models.ForeignKey(PayoutRequest, on_delete=models.SET_NULL, blank=True, null=True, related_name="ledger_entries")
+    entry_type = models.CharField(max_length=30, choices=Type.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    idempotency_key = models.CharField(max_length=180, unique=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["wallet_account", "created_at"], name="wallet_entry_time_idx")]
+
+    def __str__(self):
+        return f"{self.wallet_account} · {self.entry_type} · {self.amount}"
 
 
 class Prediction(models.Model):

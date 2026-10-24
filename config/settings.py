@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -159,7 +160,17 @@ RELWORX_WEBHOOK_SIGNING_KEY = os.getenv("RELWORX_WEBHOOK_SIGNING_KEY", "")
 RELWORX_API_BASE_URL = os.getenv("RELWORX_API_BASE_URL", "https://payments.relworx.com")
 RELWORX_WEBHOOK_URL = os.getenv(
     "RELWORX_WEBHOOK_URL",
-    "http://localhost:8000/api/v1/payments/relworx/webhook/",
+    "http://localhost:8000/api/payments/webhooks/relworx",
 )
 RELWORX_WEBHOOK_TOLERANCE_SECONDS = int(os.getenv("RELWORX_WEBHOOK_TOLERANCE_SECONDS", "300"))
 RELWORX_REQUEST_TIMEOUT_SECONDS = int(os.getenv("RELWORX_REQUEST_TIMEOUT_SECONDS", "15"))
+RELWORX_COLLECTION_FEE_RATE = Decimal(os.getenv("RELWORX_COLLECTION_FEE_RATE", "0.03"))
+RELWORX_PAYOUTS_ENABLED = env_bool("RELWORX_PAYOUTS_ENABLED", False)
+RELWORX_PAYOUT_MIN_AMOUNT = Decimal(os.getenv("RELWORX_PAYOUT_MIN_AMOUNT", "500"))
+RELWORX_PAYOUT_MAX_AMOUNT = Decimal(os.getenv("RELWORX_PAYOUT_MAX_AMOUNT", "5000000"))
+PAYOUT_EXECUTION_MODE = os.getenv("PAYOUT_EXECUTION_MODE", "request_only")
+PAYMENT_OWNER_PAYOUT_MSISDN = os.getenv("PAYMENT_OWNER_PAYOUT_MSISDN", "")
+PAYMENT_DEVELOPER_PAYOUT_MSISDN = os.getenv("PAYMENT_DEVELOPER_PAYOUT_MSISDN", "")
+DEVELOPER_COMMISSION_RATE = Decimal(os.getenv("DEVELOPER_COMMISSION_RATE", "0.20"))
+DEVELOPER_SEED_PHONE = os.getenv("DEVELOPER_SEED_PHONE", "")
+DEVELOPER_SEED_PASSWORD = os.getenv("DEVELOPER_SEED_PASSWORD", "")

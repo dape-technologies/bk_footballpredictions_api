@@ -8,6 +8,7 @@ from decimal import Decimal
 from io import StringIO
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Avg, Case, Count, IntegerField, Q, Sum, When
 from django.http import HttpResponse
@@ -21,10 +22,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import ActivityLog, User
-from accounts.permissions import IsProductOwner
+from accounts.permissions import IsDeveloper, IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
-from .models import Package, Payment, PaymentAlert, Prediction, Purchase, RecentWin, Testimonial
+from .models import Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial
+from .payment_pricing import payment_quote
 from .payment_services import (
     PaymentVerificationError,
     apply_relworx_result,
@@ -33,7 +35,9 @@ from .payment_services import (
     record_payment_event,
     record_verification_mismatch,
 )
+from .payout_services import execute_payout, settle_payout
 from .relworx import RelworxError, request_mobile_money_payment
+from .wallet_services import cancel_payout, create_payout, serialize_payout, wallet_payload
 from .serializers import (
     PackageSerializer,
     PaymentAttemptSerializer,
@@ -221,11 +225,17 @@ class PaymentAttemptView(APIView):
                 return Response({"detail": "Relworx accepts UGX payments from 500 to 5,000,000."}, status=status.HTTP_409_CONFLICT)
             if purchase.payments.filter(status__in=Payment.ACTIVE_STATUSES).exists():
                 return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
+            quote = payment_quote(purchase.price_snapshot)
+            if quote["total_charge"] > Decimal("5000000"):
+                return Response({"detail": "The package price plus provider fee exceeds the Relworx transaction limit."}, status=status.HTTP_409_CONFLICT)
             payment = Payment.objects.create(
                 purchase=purchase,
                 user=request.user,
                 package=purchase.package,
-                amount=purchase.price_snapshot,
+                amount=quote["total_charge"],
+                base_amount=quote["base_amount"],
+                provider_fee_estimate=quote["provider_fee_estimate"],
+                provider_net_amount=quote["base_amount"],
                 currency=purchase.currency_snapshot,
                 payer_msisdn=serializer.validated_data["phone"],
             )
@@ -370,6 +380,24 @@ class RelworxWebhookView(APIView):
         with transaction.atomic():
             payment = Payment.objects.select_for_update().select_related("purchase__package").filter(reference=reference).first()
             if not payment:
+                payout = PayoutRequest.objects.select_for_update().filter(reference=reference).first()
+                if payout:
+                    provider_status = str(payload.get("status") or payload.get("request_status") or "").lower()
+                    try:
+                        amount = Decimal(str(payload.get("amount", payout.amount)))
+                    except Exception:
+                        return Response({"detail": "Invalid payout amount."}, status=status.HTTP_400_BAD_REQUEST)
+                    currency = str(payload.get("currency") or payout.currency).upper()
+                    if amount != payout.amount or currency != payout.currency.upper():
+                        return Response({"detail": "Payout amount or currency mismatch."}, status=status.HTTP_400_BAD_REQUEST)
+                    internal_reference = str(payload.get("internal_reference") or "")
+                    if payout.provider_request_id and internal_reference != payout.provider_request_id:
+                        return Response({"detail": "Payout internal reference mismatch."}, status=status.HTTP_400_BAD_REQUEST)
+                    if provider_status == "success":
+                        settle_payout(payout.pk, "success", payload)
+                    elif provider_status in {"failed", "failure", "declined", "cancelled", "canceled"}:
+                        settle_payout(payout.pk, "failed", payload)
+                    return Response({"status": "ok"})
                 record_activity(
                     request,
                     category=ActivityLog.Category.SUBSCRIPTION,
@@ -408,6 +436,74 @@ class RelworxWebhookView(APIView):
             metadata={"field": field},
         )
         return Response({"detail": f"Payment {field} mismatch."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class WalletView(APIView):
+    beneficiary = "owner"
+    permission_classes = [IsProductOwner]
+
+    def get(self, request):
+        return Response(wallet_payload(self.beneficiary, request.user))
+
+
+class OwnerWalletView(WalletView):
+    pass
+
+
+class DeveloperWalletView(WalletView):
+    beneficiary = "developer"
+    permission_classes = [IsDeveloper]
+
+
+class PayoutRequestView(WalletView):
+    def post(self, request):
+        try:
+            payout = create_payout(
+                self.beneficiary, request.data.get("amount"), request.user,
+                request.data.get("request_token"),
+            )
+        except (DjangoValidationError, TypeError, ValueError) as error:
+            details = getattr(error, "message_dict", {"amount": [str(error)]})
+            return Response(details, status=status.HTTP_400_BAD_REQUEST)
+        if settings.PAYOUT_EXECUTION_MODE == "immediate":
+            payout = execute_payout(payout.pk)
+        return Response({
+            "message": "Payout submitted to Relworx." if payout.status == PayoutRequest.Status.PROCESSING else "Payout request reserved.",
+            "request": serialize_payout(payout),
+            **wallet_payload(self.beneficiary, request.user),
+        }, status=status.HTTP_201_CREATED)
+
+
+class OwnerPayoutRequestView(PayoutRequestView):
+    pass
+
+
+class DeveloperPayoutRequestView(PayoutRequestView):
+    beneficiary = "developer"
+    permission_classes = [IsDeveloper]
+
+
+class PayoutCancelView(WalletView):
+    def post(self, request, pk):
+        payout = PayoutRequest.objects.filter(pk=pk).first()
+        if not payout:
+            return Response({"detail": "Payout request not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            payout = cancel_payout(payout, request.user, self.beneficiary)
+        except PermissionError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError as error:
+            return Response(error.message_dict, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"request": serialize_payout(payout), **wallet_payload(self.beneficiary, request.user)})
+
+
+class OwnerPayoutCancelView(PayoutCancelView):
+    pass
+
+
+class DeveloperPayoutCancelView(PayoutCancelView):
+    beneficiary = "developer"
+    permission_classes = [IsDeveloper]
 
 
 class OwnerDashboardView(APIView):
@@ -513,7 +609,10 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         paid = queryset.filter(status=Payment.Status.PAID)
         confirmed = paid.count()
         gross = paid.aggregate(value=Sum("amount"))["value"] or Decimal("0")
+        package_revenue = paid.aggregate(value=Sum("base_amount"))["value"] or Decimal("0")
+        fee_estimates = paid.aggregate(value=Sum("provider_fee_estimate"))["value"] or Decimal("0")
         fees = paid.aggregate(value=Sum("provider_charge"))["value"] or Decimal("0")
+        commissions = paid.aggregate(value=Sum("developer_commission"))["value"] or Decimal("0")
         by_status = list(queryset.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status"))
         by_provider = list(queryset.values("provider").annotate(count=Count("id"), amount=Sum("amount")).order_by("provider"))
         by_package = list(queryset.values("package_id", "package__name").annotate(count=Count("id"), amount=Sum("amount")).order_by("package__name"))
@@ -531,8 +630,12 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 "confirmed": confirmed,
                 "success_rate": round(confirmed * 100 / attempts, 2) if attempts else 0,
                 "gross_revenue": gross,
+                "package_revenue": package_revenue,
+                "provider_fee_estimates": fee_estimates,
                 "provider_fees": fees,
                 "net_revenue": gross - fees,
+                "developer_commissions": commissions,
+                "owner_net": gross - fees - commissions,
                 "pending": queryset.filter(status__in=[Payment.Status.SUBMITTED, Payment.Status.PENDING]).count(),
                 "needs_review": queryset.filter(status=Payment.Status.NEEDS_REVIEW).count(),
             },
@@ -548,14 +651,18 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         writer = csv.writer(output)
         writer.writerow([
             "BK reference", "Relworx reference", "Provider transaction", "Customer", "Phone",
-            "Package", "Amount", "Currency", "Status", "Provider", "Provider fee",
+            "Package", "Package price", "Customer charge", "Currency", "Status", "Provider",
+            "Estimated fee", "Actual provider fee", "Provider net", "Developer commission",
             "Failure category", "Failure reason", "Created", "Confirmed",
         ])
         for payment in self.filter_queryset(self.get_queryset()).iterator():
             writer.writerow([
                 payment.reference, payment.internal_reference, payment.provider_transaction_id,
-                payment.user.full_name, payment.user.phone, payment.package.name, payment.amount,
-                payment.currency, payment.status, payment.provider, payment.provider_charge or "",
+                payment.user.full_name, payment.user.phone, payment.package.name,
+                payment.base_amount or payment.amount, payment.amount, payment.currency,
+                payment.status, payment.provider, payment.provider_fee_estimate or "",
+                payment.provider_charge or "", payment.provider_net_amount or "",
+                payment.developer_commission,
                 payment.failure_category, payment.failure_reason, payment.created_at.isoformat(),
                 payment.confirmed_at.isoformat() if payment.confirmed_at else "",
             ])

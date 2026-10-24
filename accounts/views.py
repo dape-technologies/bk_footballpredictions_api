@@ -86,7 +86,7 @@ def admin_login_view(request):
         raise serializers.ValidationError(serializer.errors)
 
     user = serializer.validated_data["user"]
-    if not user.is_product_owner:
+    if not (user.is_product_owner or user.is_developer):
         record_activity(
             request,
             category=ActivityLog.Category.AUTHENTICATION,
@@ -95,7 +95,7 @@ def admin_login_view(request):
             actor=user,
             target=user,
         )
-        raise serializers.ValidationError("Administrator access is required.")
+        raise serializers.ValidationError("Owner or developer access is required.")
 
     login(request, user)
     record_activity(

@@ -23,6 +23,12 @@ from .views import (
     PublicRecentWinViewSet,
     PublicTestimonialViewSet,
     RelworxWebhookView,
+    OwnerWalletView,
+    OwnerPayoutRequestView,
+    OwnerPayoutCancelView,
+    DeveloperWalletView,
+    DeveloperPayoutRequestView,
+    DeveloperPayoutCancelView,
 )
 
 public_router = DefaultRouter()
@@ -52,5 +58,11 @@ urlpatterns = [
     path("performance/", PublicPerformanceView.as_view(), name="public-performance"),
     path("owner/dashboard/", OwnerDashboardView.as_view(), name="owner-dashboard"),
     path("owner/performance/", OwnerPerformanceView.as_view(), name="owner-performance"),
+    path("owner/wallet/", OwnerWalletView.as_view(), name="owner-wallet"),
+    path("owner/payout-requests/", OwnerPayoutRequestView.as_view(), name="owner-payout-request"),
+    path("owner/payout-requests/<int:pk>/cancel/", OwnerPayoutCancelView.as_view(), name="owner-payout-cancel"),
+    path("developer/wallet/", DeveloperWalletView.as_view(), name="developer-wallet"),
+    path("developer/payout-requests/", DeveloperPayoutRequestView.as_view(), name="developer-payout-request"),
+    path("developer/payout-requests/<int:pk>/cancel/", DeveloperPayoutCancelView.as_view(), name="developer-payout-cancel"),
     path("owner/", include(owner_router.urls)),
 ]

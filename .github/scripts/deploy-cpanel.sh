@@ -97,6 +97,7 @@ env_tmp=""
 
 cd "$app_root"
 python manage.py ensure_admin
+python manage.py ensure_developer
 python manage.py collectstatic --noinput --clear
 mkdir -p tmp
 touch tmp/restart.txt

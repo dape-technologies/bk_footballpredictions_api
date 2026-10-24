@@ -7,6 +7,7 @@ from django.utils.dateparse import parse_datetime
 
 from .models import Payment, PaymentAlert, PaymentEvent
 from .relworx import RelworxError, check_mobile_money_payment
+from .wallet_services import accrue_payment
 
 
 SAFE_PROVIDER_FIELDS = (
@@ -32,7 +33,13 @@ class PaymentVerificationError(Exception):
 
 
 def safe_provider_payload(payload):
-    return {key: payload.get(key) for key in SAFE_PROVIDER_FIELDS if key in payload}
+    safe = {}
+    for key in SAFE_PROVIDER_FIELDS:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        safe[key] = str(value) if isinstance(value, Decimal) else value
+    return safe
 
 
 def record_payment_event(payment, event_type, *, source="system", message="", payload=None, status_value=None):
@@ -111,7 +118,8 @@ def apply_relworx_result(payment, payload, *, source):
         updates.append("provider_transaction_id")
     if payload.get("charge") not in (None, ""):
         payment.provider_charge = _decimal(payload.get("charge"), "provider charge")
-        updates.append("provider_charge")
+        payment.provider_net_amount = max(Decimal("0"), payment.amount - payment.provider_charge)
+        updates.extend(["provider_charge", "provider_net_amount"])
 
     payment.last_checked_at = now
     payment.check_attempts += 1
@@ -146,6 +154,7 @@ def apply_relworx_result(payment, payload, *, source):
         payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
         payment.purchase.complete(completed_at)
         payment.issue_receipt()
+        accrue_payment(payment)
         payment.alerts.filter(resolved_at__isnull=True).update(resolved_at=now)
         record_payment_event(payment, "payment.confirmed", source=source, payload=payload)
         return payment

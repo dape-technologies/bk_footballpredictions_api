@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
+from .models import Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial, WalletAccount, WalletLedgerEntry
 
 
 @admin.register(Package)
@@ -57,3 +57,25 @@ class PaymentAlertAdmin(admin.ModelAdmin):
     list_filter = ["severity", "resolved_at"]
     search_fields = ["alert_key", "title", "message", "payment__reference"]
     readonly_fields = ["payment", "alert_key", "severity", "title", "message", "created_at"]
+
+
+@admin.register(WalletAccount)
+class WalletAccountAdmin(admin.ModelAdmin):
+    list_display = ["beneficiary", "provider", "currency", "created_at"]
+    readonly_fields = ["beneficiary", "provider", "currency", "created_at", "updated_at"]
+
+
+@admin.register(WalletLedgerEntry)
+class WalletLedgerEntryAdmin(admin.ModelAdmin):
+    list_display = ["wallet_account", "entry_type", "amount", "payment", "payout_request", "created_at"]
+    list_filter = ["entry_type", "wallet_account__beneficiary"]
+    search_fields = ["idempotency_key", "payment__reference", "payout_request__reference"]
+    readonly_fields = ["wallet_account", "payment", "payout_request", "entry_type", "amount", "idempotency_key", "metadata", "created_at"]
+
+
+@admin.register(PayoutRequest)
+class PayoutRequestAdmin(admin.ModelAdmin):
+    list_display = ["reference", "beneficiary", "amount", "status", "requested_by", "created_at"]
+    list_filter = ["beneficiary", "status", "provider"]
+    search_fields = ["reference", "provider_request_id", "transaction_id"]
+    readonly_fields = [field.name for field in PayoutRequest._meta.fields]

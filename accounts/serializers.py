@@ -10,18 +10,22 @@ class UserSerializer(serializers.ModelSerializer):
     surname = serializers.CharField(source="last_name", read_only=True)
     full_name = serializers.CharField(read_only=True)
     is_owner = serializers.SerializerMethodField()
+    is_developer = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "phone", "first_name", "surname", "full_name", "date_of_birth",
-            "roles", "is_owner", "is_blocked", "created_at",
+            "roles", "is_owner", "is_developer", "is_blocked", "created_at",
         ]
         read_only_fields = fields
 
     def get_is_owner(self, obj):
         return obj.is_product_owner
+
+    def get_is_developer(self, obj):
+        return obj.is_developer
 
     def get_roles(self, obj):
         roles = list(obj.groups.order_by("name").values_list("name", flat=True))

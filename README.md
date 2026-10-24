@@ -38,7 +38,7 @@ When GitHub manages these values, remove the corresponding `RELWORX_*` entries f
 
 For manual deployments, add the same values to the Django application's **Environment variables** section under **Setup Python App** or to the private application-root `.env`, then restart the application. Do not upload a populated `.env` file to `public_html` or commit secrets to Git. `DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, and `CSRF_TRUSTED_ORIGINS` must also be configured before setting `DJANGO_DEBUG=false`.
 
-Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends payment updates to `/api/v1/payments/relworx/webhook/`.
+Customer purchase endpoints are under `/api/v1/me/purchases/`. Relworx sends signed collection and payout updates to `/api/payments/webhooks/relworx`. The former `/api/v1/payments/relworx/webhook/` endpoint remains available for transition, but the configured signing URL must be the new exact URL.
 
 Complete this production checklist in the Relworx dashboard:
 
@@ -47,7 +47,7 @@ Complete this production checklist in the Relworx dashboard:
 3. Add the production server's outbound public IP under **Edit Business Account → API Authorized IPs**.
 4. Ask Relworx support to enable UGX transactions if the wallet reports `Can't transact in UGX`.
 5. Copy the business account's webhook authentication key into `RELWORX_WEBHOOK_SIGNING_KEY`.
-6. Set the Request Payment Webhook to the exact public `RELWORX_WEBHOOK_URL`, including HTTPS and the trailing slash. The configured value and callback URL must match byte-for-byte for signature verification.
+6. Set both collection and payout webhooks to the exact public `RELWORX_WEBHOOK_URL`. The configured value and callback URL must match byte-for-byte for signature verification.
 7. Keep every Relworx secret in the Django/cPanel environment only. Do not use `VITE_` variables for these values.
 
 Checkout initiates an MTN/Airtel prompt and polls Relworx's request-status endpoint while awaiting the signed webhook. This reconciliation path recovers completed payments if a webhook is delayed or missed; amount, currency, customer reference, and Relworx internal reference are all checked before access is unlocked.
@@ -58,9 +58,18 @@ Run the provider-backed reconciliation command every five minutes in production:
 
 ```bash
 python manage.py reconcile_payments --batch-size 100 --max-attempts 12 --max-age-hours 24
+python manage.py reconcile_payouts --batch-size 100
 ```
 
 The command checks submitted or pending attempts whose next-check time has arrived. It uses the Relworx internal reference when available and falls back to the unique BK customer reference after an uncertain initiation response. Exact reference, amount, and currency validation still applies. Repeated provider errors move the payment to `needs_review` and create an owner-visible alert; the command never marks a payment paid without a successful provider response.
+
+## Wallets, pricing, and payouts
+
+Confirmed payments credit immutable owner and developer ledgers exactly once. `RELWORX_COLLECTION_FEE_RATE` controls the checkout fee estimate and `DEVELOPER_COMMISSION_RATE` controls the commission split. Provider-reported fees replace estimates for net settlement reporting.
+
+Payout requests reserve wallet funds transactionally and use client request tokens for idempotency. Configure `PAYMENT_OWNER_PAYOUT_MSISDN` and `PAYMENT_DEVELOPER_PAYOUT_MSISDN` on the server. Keep `PAYOUT_EXECUTION_MODE=request_only` and `RELWORX_PAYOUTS_ENABLED=False` until Relworx confirms payout capability for the business account; switch to `immediate` and `True` only after that approval. Successful signed webhooks or scheduled reconciliation finalize the debit, while definitive failures release the reservation.
+
+Owner wallet APIs are under `/api/v1/owner/`; developer wallet APIs are under `/api/v1/developer/`. Create the separate Developer group account by setting `DEVELOPER_SEED_PHONE` and `DEVELOPER_SEED_PASSWORD`; deployments run `ensure_developer` without changing an existing developer password.
 
 ## Deployment
 

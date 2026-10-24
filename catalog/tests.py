@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import time
 from datetime import timedelta
+from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
@@ -12,7 +13,8 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase
+from .models import Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, WalletLedgerEntry
+from .wallet_services import wallet_account
 
 
 class OwnerRolePermissionTests(APITestCase):
@@ -24,6 +26,7 @@ class OwnerRolePermissionTests(APITestCase):
         "/api/v1/owner/payments/report/",
         "/api/v1/owner/payment-alerts/",
         "/api/v1/owner/performance/",
+        "/api/v1/owner/wallet/",
         "/api/v1/owner/predictions/",
         "/api/v1/owner/recent-wins/",
         "/api/v1/owner/testimonials/",
@@ -144,7 +147,7 @@ class PurchaseFlowTests(APITestCase):
             "message": "Request payment completed successfully.",
             "customer_reference": payment.reference,
             "internal_reference": payment.internal_reference,
-            "amount": 10000,
+            "amount": payment.amount,
             "currency": "UGX",
             "provider": "mtn_mobile_money",
             "completed_at": timezone.now().isoformat(),
@@ -315,6 +318,9 @@ class PurchaseFlowTests(APITestCase):
         self.assertTrue(purchase.is_paid)
         self.assertEqual(payment.status, Payment.Status.PAID)
         self.assertEqual(purchase.code_snapshot, "BK-DAY-78")
+        self.assertEqual(payment.base_amount, Decimal("10000"))
+        self.assertEqual(payment.provider_fee_estimate, payment.amount - payment.base_amount)
+        self.assertEqual(WalletLedgerEntry.objects.filter(payment=payment).count(), 2)
 
     @patch("catalog.payment_services.check_mobile_money_payment")
     def test_status_refresh_recovers_a_missed_success_webhook(self, mocked_check):
@@ -325,7 +331,7 @@ class PurchaseFlowTests(APITestCase):
             "message": "Request payment completed successfully.",
             "customer_reference": payment.reference,
             "internal_reference": payment.internal_reference,
-            "amount": 10000,
+            "amount": payment.amount,
             "currency": "UGX",
             "provider": "MTN_UGANDA",
             "completed_at": timezone.now().isoformat(),
@@ -453,10 +459,11 @@ class PurchaseFlowTests(APITestCase):
         self.assertGreaterEqual(len(detail.data["events"]), 3)
         self.assertEqual(report.status_code, 200)
         self.assertEqual(report.data["summary"]["confirmed"], 1)
-        self.assertEqual(str(report.data["summary"]["net_revenue"]), "9900")
+        self.assertEqual(Decimal(str(report.data["summary"]["net_revenue"])), payment.amount - Decimal("100"))
         self.assertEqual(exported.status_code, 200)
         self.assertIn("text/csv", exported["Content-Type"])
         self.assertIn("TXN-REPORT", exported.content.decode())
+
 
     def test_measured_performance_uses_settled_published_predictions(self):
         self.prediction.result = Prediction.Result.WON
@@ -477,7 +484,7 @@ class PurchaseFlowTests(APITestCase):
             "message": "Request payment completed successfully.",
             "customer_reference": payment.reference,
             "internal_reference": payment.internal_reference,
-            "amount": 10000,
+            "amount": payment.amount,
             "currency": "UGX",
             "provider": "MTN_UGANDA",
             "provider_transaction_id": "TXN-CRON",
@@ -498,3 +505,69 @@ class PurchaseFlowTests(APITestCase):
         self.client.force_login(self.owner)
         response = self.client.post(f"/api/v1/owner/payments/{payment.id}/resolve/", {"decision": "confirm"}, format="json")
         self.assertEqual(response.status_code, 404)
+
+
+@override_settings(
+    RELWORX_WEBHOOK_SIGNING_KEY="webhook-secret",
+    RELWORX_WEBHOOK_URL="http://testserver/api/payments/webhooks/relworx",
+    RELWORX_PAYOUTS_ENABLED=True,
+    PAYOUT_EXECUTION_MODE="immediate",
+    PAYMENT_OWNER_PAYOUT_MSISDN="0700000000",
+    PAYMENT_DEVELOPER_PAYOUT_MSISDN="0711111111",
+)
+class WalletPayoutTests(APITestCase):
+    def setUp(self):
+        owner_group, _ = Group.objects.get_or_create(name="Product Owner")
+        developer_group, _ = Group.objects.get_or_create(name="Developer")
+        self.owner = User.objects.create_user(phone="0704000001", first_name="Wallet", last_name="Owner", password="pass")
+        self.owner.groups.add(owner_group)
+        self.developer = User.objects.create_user(phone="0704000002", first_name="Platform", last_name="Developer", password="pass")
+        self.developer.groups.add(developer_group)
+        account = wallet_account("owner")
+        WalletLedgerEntry.objects.create(
+            wallet_account=account, entry_type=WalletLedgerEntry.Type.PAYMENT_CREDIT,
+            amount=Decimal("5000"), idempotency_key="test-owner-credit",
+        )
+
+    def signature(self, payload):
+        timestamp = int(time.time())
+        signed = f"http://testserver/api/payments/webhooks/relworx{timestamp}"
+        for key in sorted(["status", "customer_reference", "internal_reference"]):
+            signed += f"{key}{payload.get(key, '')}"
+        value = hmac.new(b"webhook-secret", signed.encode(), hashlib.sha256).hexdigest()
+        return f"t={timestamp},v={value}"
+
+    def test_roles_cannot_cross_wallet_boundaries(self):
+        self.client.force_login(self.owner)
+        self.assertEqual(self.client.get("/api/v1/owner/wallet/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/developer/wallet/").status_code, 403)
+        self.client.force_login(self.developer)
+        self.assertEqual(self.client.get("/api/v1/developer/wallet/").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/owner/wallet/").status_code, 403)
+
+    @patch("catalog.payout_services.request_mobile_money_payout")
+    def test_live_payout_is_idempotent_and_signed_webhook_settles_it(self, mocked_send):
+        mocked_send.return_value = {"success": True, "internal_reference": "RWX-PAYOUT-1"}
+        self.client.force_login(self.owner)
+        body = {"amount": 1000, "request_token": "same-payout-token-12345"}
+        first = self.client.post("/api/v1/owner/payout-requests/", body, format="json")
+        second = self.client.post("/api/v1/owner/payout-requests/", body, format="json")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(PayoutRequest.objects.count(), 1)
+        self.assertEqual(mocked_send.call_count, 1)
+        payout = PayoutRequest.objects.get()
+        payload = {
+            "status": "success", "customer_reference": payout.reference,
+            "internal_reference": "RWX-PAYOUT-1", "provider_transaction_id": "TX-PAYOUT-1",
+            "amount": "1000", "currency": "UGX", "charge": "15",
+        }
+        response = self.client.post(
+            "/api/payments/webhooks/relworx", payload, format="json",
+            HTTP_RELWORX_SIGNATURE=self.signature(payload),
+        )
+        payout.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payout.status, PayoutRequest.Status.COMPLETED)
+        self.assertEqual(payout.provider_fee_actual, Decimal("15"))
+        self.assertTrue(WalletLedgerEntry.objects.filter(idempotency_key=f"payout:{payout.pk}:fee").exists())

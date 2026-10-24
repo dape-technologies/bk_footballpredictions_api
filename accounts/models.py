@@ -35,6 +35,10 @@ class User(AbstractUser):
         return self.is_superuser or self.groups.filter(name="Product Owner").exists()
 
     @property
+    def is_developer(self):
+        return not self.is_superuser and self.groups.filter(name="Developer").exists()
+
+    @property
     def full_name(self):
         return self.get_full_name().strip()
 

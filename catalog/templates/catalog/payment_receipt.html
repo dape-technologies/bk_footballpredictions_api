@@ -40,6 +40,7 @@
       <div><dt>BK reference</dt><dd>{{ payment.reference }}</dd></div>
       <div><dt>Provider reference</dt><dd>{{ payment.internal_reference|default:"Not supplied" }}</dd></div>
     </dl>
+    {% if payment.base_amount %}<dl class="grid"><div><dt>Package price</dt><dd>{{ payment.currency }} {{ payment.base_amount }}</dd></div><div><dt>Provider fee</dt><dd>{{ payment.currency }} {{ payment.provider_charge|default:payment.provider_fee_estimate }}</dd></div></dl>{% endif %}
     <div class="total"><span>Total paid</span><strong>{{ payment.currency }} {{ payment.amount }}</strong></div>
     <footer>
       <p>This receipt confirms payment for access to the named BK package. Keep the receipt number when contacting support.</p>

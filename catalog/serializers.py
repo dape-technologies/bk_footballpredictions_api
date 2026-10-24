@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
 from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
+from .payment_pricing import payment_quote
 
 
 def media_url(request, field):
@@ -25,16 +26,25 @@ def normalize_ugandan_msisdn(value):
 class PublicPackageSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
     is_open = serializers.ReadOnlyField()
+    payment_total = serializers.SerializerMethodField()
+    payment_fee = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
         fields = [
             "id", "name", "slug", "package_type", "price", "currency",
             "win_probability", "closes_at", "image_url", "is_active", "is_open",
+            "payment_total", "payment_fee",
         ]
 
     def get_image_url(self, obj):
         return media_url(self.context.get("request"), obj.image)
+
+    def get_payment_total(self, obj):
+        return payment_quote(obj.price)["total_charge"]
+
+    def get_payment_fee(self, obj):
+        return payment_quote(obj.price)["provider_fee_estimate"]
 
 
 class PackageSerializer(serializers.ModelSerializer):
@@ -83,6 +93,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             "id", "reference", "internal_reference", "user", "package", "amount",
+            "base_amount", "provider_fee_estimate", "provider_net_amount", "developer_commission",
             "currency", "status", "provider", "payer_msisdn", "provider_message",
             "provider_transaction_id", "provider_charge", "failure_category",
             "failure_code", "failure_reason", "submitted_at", "confirmed_at",

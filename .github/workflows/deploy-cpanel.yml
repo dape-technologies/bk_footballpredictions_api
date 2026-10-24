@@ -138,7 +138,7 @@ jobs:
             printf 'RELWORX_ACCOUNT_NO=%s\n' "$RELWORX_ACCOUNT_NO"
             printf 'RELWORX_WEBHOOK_SIGNING_KEY=%s\n' "$RELWORX_WEBHOOK_SIGNING_KEY"
             printf 'RELWORX_API_BASE_URL=%s\n' "${RELWORX_API_BASE_URL%/}"
-            printf 'RELWORX_WEBHOOK_URL=%s/api/v1/payments/relworx/webhook/\n' "${PRODUCTION_URL%/}"
+            printf 'RELWORX_WEBHOOK_URL=%s/api/payments/webhooks/relworx\n' "${PRODUCTION_URL%/}"
             printf 'ADMIN_LOGIN_USERNAME=%s\n' "$ADMIN_LOGIN_USERNAME"
             printf 'ADMIN_SEED_PHONE=%s\n' "$ADMIN_SEED_PHONE"
             printf 'ADMIN_SEED_PASSWORD=%s\n' "$ADMIN_SEED_PASSWORD"
