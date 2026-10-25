@@ -41,9 +41,7 @@ def security_view(request):
             "notification_emails": recipients(request.user),
         }
         if request.user.is_developer:
-            from catalog.wallet_services import _destination, mask_msisdn
             owner = owner_account()
-            payload["owner_payout_destination"] = mask_msisdn(_destination("owner"))
             active_codes = SecurityChallenge.objects.filter(
                 user=owner, consumed_at=None, expires_at__gt=timezone.now()
             ).order_by("-created_at")[:10] if owner else []
@@ -68,10 +66,7 @@ def security_view(request):
         row.save(update_fields=["revoked_at"])
         record_activity(request, category=ActivityLog.Category.AUTHENTICATION, action="security.session_revoked", description="A privileged session was revoked.")
         return Response({"message": "Session revoked."})
-    allowed_actions = ["password"]
-    if request.user.is_developer:
-        allowed_actions.extend(["destination", "owner_destination"])
-    if action not in allowed_actions:
+    if action != "password":
         raise ValidationError({"action": "This security action is not available for your role."})
     if request.data.get("request_otp") is True:
         issue_code(request, action)
@@ -84,22 +79,13 @@ def security_view(request):
         if len(str(request.data.get("new_password", ""))) < 12:
             raise ValidationError({"new_password": "Privileged passwords must have at least 12 characters."})
     verify_code(request, action)
-    if action == "password":
-        request.user.set_password(request.data["new_password"])
-        request.user.save(update_fields=["password"])
-        PrivilegedSession.objects.filter(user=request.user).update(revoked_at=timezone.now())
-        update_session_auth_hash(request, request.user)
-        from .security_services import register_session
-        register_session(request, request.user)
-        result = {"message": "Password changed. Other sessions were revoked."}
-    else:
-        from catalog.wallet_services import wallet_account
-        from catalog.serializers import normalize_ugandan_msisdn
-        account = wallet_account("owner" if action == "owner_destination" else "developer")
-        account.destination_msisdn = normalize_ugandan_msisdn(request.data.get("destination"))
-        account.save(update_fields=["destination_msisdn"])
-        beneficiary = "owner" if action == "owner_destination" else "developer"
-        result = {"message": f"{beneficiary.title()} payout destination updated after verification."}
+    request.user.set_password(request.data["new_password"])
+    request.user.save(update_fields=["password"])
+    PrivilegedSession.objects.filter(user=request.user).update(revoked_at=timezone.now())
+    update_session_auth_hash(request, request.user)
+    from .security_services import register_session
+    register_session(request, request.user)
+    result = {"message": "Password changed. Other sessions were revoked."}
     record_activity(request, category=ActivityLog.Category.AUTHENTICATION, action=f"security.{action}", description=f"Verified security change: {action}.")
     from .security_services import queue_notice
     queue_notice(f"security-change:{action}:{secrets.token_hex(12)}", recipients(request.user), "BK security settings changed", f"Your BK {action.replace('_', ' ')} settings were changed after verification. Contact your developer if this was unexpected.")

@@ -1,6 +1,5 @@
 import secrets
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.contrib.auth.hashers import make_password, check_password
@@ -24,17 +23,6 @@ def digest(value):
 
 
 def binding_for(request, purpose):
-    if purpose == "payout":
-        try:
-            value = Decimal(str(request.data.get("amount"))).quantize(Decimal("0.01"))
-            if not value.is_finite() or value <= 0:
-                raise ValueError()
-        except (InvalidOperation, ValueError, TypeError):
-            raise ValidationError({"amount": "Enter a valid withdrawal amount."})
-        return str(value)
-    if purpose in {"destination", "owner_destination"}:
-        from catalog.serializers import normalize_ugandan_msisdn
-        return normalize_ugandan_msisdn(request.data.get("destination", ""))
     return purpose
 
 

@@ -50,21 +50,15 @@ class PrivilegedSecurityTests(APITestCase):
         result = self.client.post("/api/v1/auth/security/", {"action": "owner_recovery_code", "password": "test-password-secure"}, format="json")
         self.assertEqual(result.status_code, 400)
 
-    def test_owner_cannot_change_payout_destination(self):
-        self.client.force_login(self.owner)
-        response = self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0788357724"}, format="json")
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("role", str(response.data["action"]).lower())
-
-    def test_developer_can_change_owner_payout_destination_after_verification(self):
-        self.client.force_login(self.developer)
-        otp = self.code("owner_destination", password="developer-password-secure", destination="0745938576")
-        response = self.client.post("/api/v1/auth/security/", {
-            "action": "owner_destination", "destination": "0745938576", "otp": otp,
-        }, format="json")
-        self.assertEqual(response.status_code, 200, response.data)
-        from catalog.wallet_services import wallet_account
-        self.assertEqual(wallet_account("owner").destination_msisdn, "+256745938576")
+    def test_no_privileged_role_can_change_payout_destinations(self):
+        for user in [self.owner, self.developer]:
+            self.client.force_login(user)
+            for action in ["destination", "owner_destination"]:
+                response = self.client.post("/api/v1/auth/security/", {
+                    "action": action, "destination": "0788357724",
+                }, format="json")
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("role", str(response.data["action"]).lower())
 
     def test_expired_session_is_logged_out(self):
         self.client.force_login(self.owner)
