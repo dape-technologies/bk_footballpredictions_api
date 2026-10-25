@@ -124,6 +124,7 @@ class PaymentSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
     package = PublicPackageSerializer(read_only=True)
     receipt_url = serializers.SerializerMethodField()
+    customer_message = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
@@ -134,7 +135,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             "provider_transaction_id", "provider_charge", "failure_category",
             "failure_code", "failure_reason", "submitted_at", "confirmed_at",
             "failed_at", "last_checked_at", "check_attempts", "receipt_number",
-            "receipt_issued_at", "receipt_url", "paid_at", "created_at", "updated_at",
+            "receipt_issued_at", "receipt_url", "customer_message", "paid_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
 
@@ -144,6 +145,31 @@ class PaymentSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         path = f"/api/v1/me/payments/{obj.pk}/receipt/"
         return request.build_absolute_uri(path) if request else path
+
+    def get_customer_message(self, obj):
+        if obj.status == Payment.Status.PAID:
+            return "Payment confirmed. Your package is ready."
+        if obj.status in (Payment.Status.CREATED, Payment.Status.SUBMITTED, Payment.Status.PENDING):
+            return "Approve the mobile-money prompt on your phone. We will confirm it automatically."
+        if obj.status == Payment.Status.EXPIRED or obj.failure_code == "approval_window_expired":
+            return "The payment prompt expired before confirmation. Try again to receive a new prompt."
+
+        detail = f"{obj.failure_code} {obj.failure_reason} {obj.provider_message}".lower()
+        if "wrong pin" in detail or "incorrect pin" in detail:
+            return "The mobile-money PIN entered was incorrect. Check your PIN and try again."
+        if "insufficient" in detail:
+            return "Your mobile-money account does not have enough available balance for this payment."
+        if "low_balance_or_payee_limit_reached_or_not_allowed" in detail:
+            return "The mobile-money provider declined this request because of insufficient balance, an account limit, or a transaction restriction."
+        if "cancel" in detail or obj.status == Payment.Status.CANCELLED:
+            return "The payment was cancelled. Try again when you are ready."
+        if obj.status == Payment.Status.NEEDS_REVIEW:
+            return "We could not confirm this payment automatically. Please contact BK support before trying again."
+        if obj.failure_category in (Payment.FailureCategory.PROVIDER, Payment.FailureCategory.SYSTEM):
+            return "The mobile-money provider could not complete this request. Please try again."
+        if obj.status == Payment.Status.FAILED:
+            return "The payment was not completed. Check your mobile-money account and try again."
+        return "Payment status is being updated."
 
 
 class PaymentEventSerializer(serializers.ModelSerializer):
@@ -220,10 +246,12 @@ class PurchaseSerializer(serializers.ModelSerializer):
         return PaymentSerializer(payment, context=self.context).data if payment else None
 
     def get_payment_timeline(self, obj):
+        payment_serializer = PaymentSerializer(context=self.context)
         return [{"reference": payment.reference, "status": payment.status,
                  "created_at": payment.created_at, "submitted_at": payment.submitted_at,
                  "confirmed_at": payment.confirmed_at, "failed_at": payment.failed_at,
-                 "failure_reason": payment.failure_reason}
+                 "failure_reason": payment.failure_reason,
+                 "customer_message": payment_serializer.get_customer_message(payment)}
                 for payment in obj.payments.all()]
 
     def get_access_history(self, obj):

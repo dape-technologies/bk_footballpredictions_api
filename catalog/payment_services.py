@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -186,11 +187,25 @@ def apply_relworx_result(payment, payload, *, source):
 
     if provider_status in {"pending", "processing", "in_progress", "submitted"}:
         if payment.status != Payment.Status.PAID:
-            payment.status = Payment.Status.PENDING
-            payment.reconciliation_next_at = now + timedelta(minutes=2)
-            updates.extend(["status", "reconciliation_next_at"])
+            expiry_minutes = max(1, settings.PAYMENT_PENDING_EXPIRY_MINUTES)
+            if payment.created_at <= now - timedelta(minutes=expiry_minutes):
+                payment.status = Payment.Status.EXPIRED
+                payment.failure_category = Payment.FailureCategory.CUSTOMER
+                payment.failure_code = "approval_window_expired"
+                payment.failure_reason = "The mobile-money approval window expired before payment was confirmed."
+                payment.failed_at = now
+                payment.reconciliation_next_at = None
+                updates.extend([
+                    "status", "failure_category", "failure_code", "failure_reason",
+                    "failed_at", "reconciliation_next_at",
+                ])
+            else:
+                payment.status = Payment.Status.PENDING
+                payment.reconciliation_next_at = now + timedelta(minutes=2)
+                updates.extend(["status", "reconciliation_next_at"])
             payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
-            record_payment_event(payment, "payment.pending", source=source, payload=payload)
+            event_type = "payment.expired" if payment.status == Payment.Status.EXPIRED else "payment.pending"
+            record_payment_event(payment, event_type, source=source, message=payment.failure_reason, payload=payload)
         return payment
 
     raise PaymentVerificationError("status", "Unsupported payment status.")

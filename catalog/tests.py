@@ -362,6 +362,61 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(response.data["status"], Payment.Status.PENDING)
         self.assertEqual(payment.status, Payment.Status.PENDING)
 
+    @override_settings(PAYMENT_PENDING_EXPIRY_MINUTES=15)
+    @patch("catalog.payment_services.check_mobile_money_payment")
+    def test_status_refresh_expires_stale_provider_pending_payment(self, mocked_check):
+        purchase, payment = self.start_payment()
+        Payment.objects.filter(pk=payment.pk).update(created_at=timezone.now() - timedelta(minutes=16))
+        mocked_check.return_value = {
+            "success": True,
+            "status": "pending",
+            "customer_reference": payment.reference,
+            "internal_reference": payment.internal_reference,
+        }
+
+        response = self.client.post(f"/api/v1/me/payments/{payment.id}/refresh/", {}, format="json")
+
+        payment.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payment.status, Payment.Status.EXPIRED)
+        self.assertEqual(payment.failure_code, "approval_window_expired")
+        self.assertIn("new prompt", response.data["customer_message"])
+
+        with patch("catalog.views.request_mobile_money_payment") as mocked_request:
+            mocked_request.return_value = {
+                "success": True,
+                "message": "Request payment in progress.",
+                "internal_reference": "relworx-internal-retry",
+            }
+            retry = self.client.post(
+                f"/api/v1/me/purchases/{purchase.id}/payment-attempts/",
+                {"phone": "0773454899"},
+                format="json",
+            )
+        self.assertEqual(retry.status_code, 202)
+        self.assertNotEqual(retry.data["id"], payment.id)
+
+    def test_customer_message_explains_wrong_pin_without_hiding_owner_detail(self):
+        _, payment = self.start_payment()
+        payment.status = Payment.Status.FAILED
+        payment.failure_category = Payment.FailureCategory.CUSTOMER
+        payment.failure_code = "failed"
+        payment.failure_reason = "WRONG PIN entered, please try again."
+        payment.provider_message = payment.failure_reason
+        payment.failed_at = timezone.now()
+        payment.reconciliation_next_at = None
+        payment.save(update_fields=[
+            "status", "failure_category", "failure_code", "failure_reason",
+            "provider_message", "failed_at", "reconciliation_next_at", "updated_at",
+        ])
+
+        response = self.client.get(f"/api/v1/me/payments/{payment.id}/refresh/")
+        self.assertEqual(response.status_code, 405)
+        purchase_response = self.client.get("/api/v1/me/purchases/")
+        latest = purchase_response.data[0]["latest_payment"]
+        self.assertIn("PIN", latest["customer_message"])
+        self.assertEqual(latest["failure_reason"], "WRONG PIN entered, please try again.")
+
     def test_user_cannot_refresh_another_users_payment(self):
         _, payment = self.start_payment()
         self.client.force_login(self.other)
