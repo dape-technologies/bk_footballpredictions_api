@@ -77,6 +77,22 @@ class OwnerRolePermissionTests(APITestCase):
         self.client.force_login(self.owner)
         self.assert_owner_views_return(200)
 
+    def test_owner_dashboard_includes_internal_wallet_balance(self):
+        self.client.force_login(self.owner)
+        account = wallet_account("owner")
+        WalletLedgerEntry.objects.create(
+            wallet_account=account,
+            entry_type=WalletLedgerEntry.Type.PAYMENT_CREDIT,
+            amount=27500,
+            idempotency_key="test:owner-dashboard-wallet",
+        )
+
+        response = self.client.get("/api/v1/owner/dashboard/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Decimal(str(response.data["wallet"]["available"])), Decimal("27500"))
+        self.assertEqual(response.data["wallet"]["currency"], "UGX")
+
 
 @override_settings(
     RELWORX_API_KEY="test-key",

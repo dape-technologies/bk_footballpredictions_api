@@ -479,9 +479,15 @@ class WalletView(APIView):
 
     def get(self, request):
         payload = wallet_payload(self.beneficiary, request.user)
-        try:
-            payload["provider_balance"] = check_wallet_balance().get("balance")
-        except RelworxError:
+        # The owner dashboard deliberately reports BK's internal ledger balance.
+        # Relworx's shared provider balance is an operational concern exposed to
+        # the developer only, and querying it on every owner refresh adds latency.
+        if self.beneficiary == "developer":
+            try:
+                payload["provider_balance"] = check_wallet_balance().get("balance")
+            except RelworxError:
+                payload["provider_balance"] = None
+        else:
             payload["provider_balance"] = None
         return Response(payload)
 
@@ -822,6 +828,7 @@ class OwnerDashboardView(APIView):
             "open_payment_alerts": PaymentAlert.objects.filter(resolved_at__isnull=True).count(),
             "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
             "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,
+            "wallet": wallet_summary("owner"),
             "package_demand": list(
                 Package.objects.filter(deleted_at__isnull=True).annotate(
                     request_count=Count("purchases"),
