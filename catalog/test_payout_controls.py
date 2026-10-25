@@ -6,7 +6,7 @@ from django.core import mail
 from django.test import override_settings
 from rest_framework.test import APITestCase
 
-from accounts.models import User
+from accounts.models import EmailNotice, User
 from catalog.models import WalletLedgerEntry
 from catalog.wallet_services import wallet_account, create_payout
 
@@ -39,18 +39,18 @@ class PayoutControlTests(APITestCase):
         with self.assertRaisesMessage(ValidationError, "1,500"):
             create_payout("owner", 5000, self.owner)
 
-    def test_password_and_amount_bound_otp_go_to_both_owner_contacts(self):
+    def test_owner_payout_requires_password_and_alerts_both_contacts(self):
         self.client.force_login(self.owner)
+        mail.outbox.clear()
         endpoint = "/api/v1/owner/payout-requests/"
         self.assertEqual(self.client.post(endpoint, {"amount": 500}, format="json").status_code, 400)
-        response = self.client.post(endpoint, {"request_otp": True, "password": "test-password", "amount": 500}, format="json")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(mail.outbox[0].to), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
-        import re
-        code = re.search(r"code is (\d{6})", mail.outbox[0].body).group(1)
-        self.assertEqual(self.client.post(endpoint, {"amount": 600, "otp": code}, format="json").status_code, 400)
-        self.assertEqual(self.client.post(endpoint, {"amount": 500, "otp": code}, format="json").status_code, 201)
-        self.assertEqual(self.client.post(endpoint, {"amount": 500, "otp": code}, format="json").status_code, 400)
+        self.assertEqual(self.client.post(endpoint, {"amount": 500, "password": "wrong"}, format="json").status_code, 400)
+        response = self.client.post(endpoint, {"amount": 500, "password": "test-password"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        notice = EmailNotice.objects.get(dedup_key__startswith="owner-payout:")
+        self.assertEqual(set(notice.recipients), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
+        self.assertIn("UGX 500.00", notice.body)
+        self.assertIn(response.data["request"]["reference"], notice.body)
 
     def test_owner_user_listing_hides_developer(self):
         self.client.force_login(self.owner)

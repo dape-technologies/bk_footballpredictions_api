@@ -512,18 +512,8 @@ class PayoutRequestView(WalletView):
         from .wallet_services import wallet_account
         if wallet_account(self.beneficiary).payouts_frozen:
             return Response({"detail": "Wallet frozen please contact your developer."}, status=423)
-        if settings.PAYOUT_EMAIL_OTP_REQUIRED:
-            from accounts.payout_security import issue_code, verify_code
-            if request.data.get("request_otp") is True:
-                try:
-                    issue_code(request)
-                except Exception as error:
-                    from rest_framework.exceptions import ValidationError
-                    if isinstance(error, ValidationError):
-                        raise
-                    return Response({"detail": "Verification email could not be sent. No payout was created."}, status=503)
-                return Response({"message": "Withdrawal verification code sent to the security email addresses."})
-            verify_code(request)
+        if not request.user.check_password(str(request.data.get("password", ""))):
+            return Response({"password": ["Incorrect password."]}, status=status.HTTP_400_BAD_REQUEST)
         try:
             payout = create_payout(
                 self.beneficiary, request.data.get("amount"), request.user,
@@ -534,6 +524,25 @@ class PayoutRequestView(WalletView):
             return Response(details, status=status.HTTP_400_BAD_REQUEST)
         if settings.PAYOUT_EXECUTION_MODE == "immediate":
             payout = execute_payout(payout.pk)
+        if self.beneficiary == "owner":
+            from accounts.payout_security import recipients
+            from accounts.security_services import queue_notice
+            queue_notice(
+                f"owner-payout:{payout.pk}",
+                recipients(request.user),
+                f"BK owner payout {payout.reference}",
+                (
+                    "An owner payout was created.\n\n"
+                    f"Amount: {payout.currency} {payout.amount:,.2f}\n"
+                    f"Destination: {payout.destination_msisdn}\n"
+                    f"Reference: {payout.reference}\n"
+                    f"Status: {payout.status}\n"
+                    f"Requested by: {request.user.full_name} ({request.user.phone})\n"
+                    f"Time: {timezone.localtime(payout.created_at).isoformat()}\n"
+                    f"Connection address: {request.META.get('REMOTE_ADDR') or 'Unavailable'}\n"
+                    f"Device: {request.META.get('HTTP_USER_AGENT', 'Unknown device')[:300]}"
+                ),
+            )
         return Response({
             "message": "Payout submitted to Relworx." if payout.status == PayoutRequest.Status.PROCESSING else (payout.failure_reason if payout.status == PayoutRequest.Status.FAILED else "Payout request reserved."),
             "request": serialize_payout(payout),

@@ -630,13 +630,12 @@ class WalletPayoutTests(APITestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.data["detail"], "Payment not found.")
 
-    @override_settings(PAYOUT_EMAIL_OTP_REQUIRED=False)
     @patch("catalog.wallet_services.check_wallet_balance", return_value={"success": True, "balance": "10000"})
     @patch("catalog.payout_services.request_mobile_money_payout")
     def test_live_payout_is_idempotent_and_signed_webhook_settles_it(self, mocked_send, mocked_balance):
         mocked_send.return_value = {"success": True, "internal_reference": "RWX-PAYOUT-1"}
         self.client.force_login(self.owner)
-        body = {"amount": 1000, "request_token": "same-payout-token-12345"}
+        body = {"amount": 1000, "request_token": "same-payout-token-12345", "password": "pass"}
         first = self.client.post("/api/v1/owner/payout-requests/", body, format="json")
         second = self.client.post("/api/v1/owner/payout-requests/", body, format="json")
         self.assertEqual(first.status_code, 201)

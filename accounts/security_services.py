@@ -45,7 +45,20 @@ def login_security(sender, request, user, **kwargs):
     if not (user.is_product_owner or user.is_developer):
         return
     row = register_session(request, user)
-    queue_notice(f"login:{row.pk}", recipients(user), "BK privileged account sign-in", f"A sign-in to your BK account occurred at {timezone.now().isoformat()}. Device: {row.device}. Connection address: {row.ip_address}. Review Security in your dashboard if this was unexpected.")
+    portal = "owner" if user.is_product_owner else "developer"
+    queue_notice(
+        f"login:{row.pk}",
+        recipients(user),
+        f"BK {portal} portal sign-in",
+        (
+            f"A user signed in to the BK {portal} portal.\n\n"
+            f"Account: {user.full_name} ({user.phone})\n"
+            f"Time: {timezone.localtime().isoformat()}\n"
+            f"Device: {row.device}\n"
+            f"Connection address: {row.ip_address or 'Unavailable'}\n\n"
+            "Review Security in the dashboard if this was unexpected."
+        ),
+    )
 
 
 def logout_security(sender, request, user, **kwargs):

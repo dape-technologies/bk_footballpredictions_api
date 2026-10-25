@@ -41,7 +41,9 @@ def security_view(request):
             "notification_emails": recipients(request.user),
         }
         if request.user.is_developer:
+            from catalog.wallet_services import _destination, mask_msisdn
             owner = owner_account()
+            payload["owner_payout_destination"] = mask_msisdn(_destination("owner"))
             active_codes = SecurityChallenge.objects.filter(
                 user=owner, consumed_at=None, expires_at__gt=timezone.now()
             ).order_by("-created_at")[:10] if owner else []
@@ -66,8 +68,11 @@ def security_view(request):
         row.save(update_fields=["revoked_at"])
         record_activity(request, category=ActivityLog.Category.AUTHENTICATION, action="security.session_revoked", description="A privileged session was revoked.")
         return Response({"message": "Session revoked."})
-    if action not in ["password", "destination"]:
-        raise ValidationError({"action": "Choose password, destination or revoke_session."})
+    allowed_actions = ["password"]
+    if request.user.is_developer:
+        allowed_actions.extend(["destination", "owner_destination"])
+    if action not in allowed_actions:
+        raise ValidationError({"action": "This security action is not available for your role."})
     if request.data.get("request_otp") is True:
         issue_code(request, action)
         return Response({"message": "Verification code emailed to your security contacts."})
@@ -90,10 +95,11 @@ def security_view(request):
     else:
         from catalog.wallet_services import wallet_account
         from catalog.serializers import normalize_ugandan_msisdn
-        account = wallet_account("owner" if request.user.is_product_owner else "developer")
+        account = wallet_account("owner" if action == "owner_destination" else "developer")
         account.destination_msisdn = normalize_ugandan_msisdn(request.data.get("destination"))
         account.save(update_fields=["destination_msisdn"])
-        result = {"message": "Payout destination updated after verification."}
+        beneficiary = "owner" if action == "owner_destination" else "developer"
+        result = {"message": f"{beneficiary.title()} payout destination updated after verification."}
     record_activity(request, category=ActivityLog.Category.AUTHENTICATION, action=f"security.{action}", description=f"Verified security change: {action}.")
     from .security_services import queue_notice
     queue_notice(f"security-change:{action}:{secrets.token_hex(12)}", recipients(request.user), "BK security settings changed", f"Your BK {action.replace('_', ' ')} settings were changed after verification. Contact your developer if this was unexpected.")

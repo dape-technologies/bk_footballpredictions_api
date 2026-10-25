@@ -1,5 +1,4 @@
 from datetime import date, timedelta
-import re
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import Group
@@ -10,19 +9,13 @@ from django.test import Client, override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from .models import SecurityChallenge, User
+from .models import EmailNotice, User
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class AuthenticationTests(APITestCase):
     def setUp(self):
         cache.clear()
-
-    def complete_mfa(self, endpoint, challenge):
-        code = re.search(r"code is (\d{6})", mail.outbox[-1].body).group(1)
-        return self.client.post(endpoint, {
-            "challenge_token": challenge.data["challenge_token"], "otp": code,
-        }, format="json")
 
     def test_signed_out_me_response_is_unauthorized_not_forbidden(self):
         response = self.client.get(reverse("me"))
@@ -224,16 +217,12 @@ class AuthenticationTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 202)
-        self.assertTrue(response.data["otp_required"])
-        self.assertEqual(response["Cache-Control"], "no-store, private")
-        self.assertEqual(set(mail.outbox[-1].to), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
-        code = re.search(r"code is (\d{6})", mail.outbox[-1].body).group(1)
-        self.assertNotIn(code, SecurityChallenge.objects.get(purpose="login").code_ciphertext)
-        self.assertNotIn("_auth_user_id", self.client.session)
-        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
+        notice = EmailNotice.objects.get(dedup_key__startswith="login:")
+        self.assertEqual(set(notice.recipients), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
+        self.assertIn("owner portal", notice.subject)
+        self.assertIn(owner.phone, notice.body)
         self.assertIn("_auth_user_id", self.client.session)
 
     def test_developer_can_create_a_separate_privileged_session(self):
@@ -248,11 +237,11 @@ class AuthenticationTests(APITestCase):
             {"phone": developer.phone, "password": "strong-pass-27"},
             format="json",
         )
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(set(mail.outbox[-1].to), {"dapetech.2@gmail.com"})
-        self.assertNotIn("_auth_user_id", self.client.session)
-        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
+        notice = EmailNotice.objects.get(dedup_key__startswith="login:")
+        self.assertEqual(set(notice.recipients), {"dapetech.2@gmail.com"})
+        self.assertIn("developer portal", notice.subject)
+        self.assertIn(developer.phone, notice.body)
         self.assertTrue(response.data["is_developer"])
         self.assertFalse(response.data["is_owner"])
         self.assertIn("sessionid", self.client.cookies)
@@ -283,30 +272,16 @@ class AuthenticationTests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 202)
-        response = self.complete_mfa(reverse("admin-login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["is_owner"])
 
-    def test_privileged_public_login_also_requires_otp(self):
+    def test_privileged_public_login_completes_with_password_and_sends_alert(self):
         owner = User.objects.create_superuser(phone="0701112399", password="strong-pass-27")
         response = self.client.post(reverse("login"), {"phone": owner.phone, "password": "strong-pass-27"}, format="json")
-        self.assertEqual(response.status_code, 202)
-        self.assertNotIn("_auth_user_id", self.client.session)
-        response = self.complete_mfa(reverse("login"), response)
         self.assertEqual(response.status_code, 200)
         self.assertIn("_auth_user_id", self.client.session)
-
-    def test_login_otp_is_session_bound_and_exhausts_after_five_attempts(self):
-        owner = User.objects.create_superuser(phone="0701112400", password="strong-pass-27")
-        challenge = self.client.post(reverse("admin-login"), {"phone": owner.phone, "password": "strong-pass-27"}, format="json")
-        token = challenge.data["challenge_token"]
-        other_client = self.client_class()
-        self.assertEqual(other_client.post(reverse("admin-login"), {"challenge_token": token, "otp": "000000"}, format="json").status_code, 400)
-        for _ in range(5):
-            self.assertEqual(self.client.post(reverse("admin-login"), {"challenge_token": token, "otp": "000000"}, format="json").status_code, 400)
-        code = re.search(r"code is (\d{6})", mail.outbox[0].body).group(1)
-        self.assertEqual(self.client.post(reverse("admin-login"), {"challenge_token": token, "otp": code}, format="json").status_code, 400)
+        notice = EmailNotice.objects.get(dedup_key__startswith="login:")
+        self.assertEqual(set(notice.recipients), {"makubuyahannington93@gmail.com", "dapetech.2@gmail.com"})
 
     @override_settings(
         ADMIN_LOGIN_USERNAME="admin",
@@ -338,7 +313,6 @@ class AuthenticationTests(APITestCase):
 
         response = self.client.get(reverse("admin:login"))
         self.assertRedirects(response, "/owner/login?next=/django-admin/", fetch_redirect_response=False)
-        challenge = self.client.post(reverse("admin-login"), {"phone": "admin", "password": "bkpassword"}, format="json")
-        self.assertEqual(challenge.status_code, 202)
-        self.assertEqual(self.complete_mfa(reverse("admin-login"), challenge).status_code, 200)
+        response = self.client.post(reverse("admin-login"), {"phone": "admin", "password": "bkpassword"}, format="json")
+        self.assertEqual(response.status_code, 200)
         self.assertIn("_auth_user_id", self.client.session)

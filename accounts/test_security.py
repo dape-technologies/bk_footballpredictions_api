@@ -21,8 +21,8 @@ class PrivilegedSecurityTests(APITestCase):
         self.developer.groups.add(Group.objects.get_or_create(name="Developer")[0])
         self.customer = User.objects.create_user(phone="0705111002", password="test-password-secure")
 
-    def code(self, action, **extra):
-        result = self.client.post("/api/v1/auth/security/", {"action": action, "request_otp": True, "password": "test-password-secure", **extra}, format="json")
+    def code(self, action, password="test-password-secure", **extra):
+        result = self.client.post("/api/v1/auth/security/", {"action": action, "request_otp": True, "password": password, **extra}, format="json")
         self.assertEqual(result.status_code, 200, result.data)
         return re.search(r"code is (\d{6})", mail.outbox[-1].body).group(1)
 
@@ -33,7 +33,7 @@ class PrivilegedSecurityTests(APITestCase):
 
     def test_developer_can_view_only_current_owner_otp(self):
         self.client.force_login(self.owner)
-        code = self.code("destination", destination="0749471777")
+        code = self.code("password")
         challenge = SecurityChallenge.objects.get()
         self.assertNotIn(code, challenge.code_ciphertext)
         owner_payload = self.client.get("/api/v1/auth/security/").data
@@ -43,19 +43,28 @@ class PrivilegedSecurityTests(APITestCase):
         self.assertEqual(response["Cache-Control"], "no-store, private")
         payload = response.data
         self.assertEqual(payload["current_owner_otps"][0]["code"], code)
-        self.assertEqual(payload["current_owner_otps"][0]["purpose"], "destination")
+        self.assertEqual(payload["current_owner_otps"][0]["purpose"], "password")
 
     def test_recovery_code_action_is_removed(self):
         self.client.force_login(self.owner)
         result = self.client.post("/api/v1/auth/security/", {"action": "owner_recovery_code", "password": "test-password-secure"}, format="json")
         self.assertEqual(result.status_code, 400)
 
-    def test_destination_code_cannot_authorize_different_number(self):
+    def test_owner_cannot_change_payout_destination(self):
         self.client.force_login(self.owner)
-        otp = self.code("destination", destination="0749471777")
-        response = self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0788357724", "otp": otp}, format="json")
+        response = self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0788357724"}, format="json")
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(SecurityChallenge.objects.get().attempts, 1)
+        self.assertIn("role", str(response.data["action"]).lower())
+
+    def test_developer_can_change_owner_payout_destination_after_verification(self):
+        self.client.force_login(self.developer)
+        otp = self.code("owner_destination", password="developer-password-secure", destination="0745938576")
+        response = self.client.post("/api/v1/auth/security/", {
+            "action": "owner_destination", "destination": "0745938576", "otp": otp,
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        from catalog.wallet_services import wallet_account
+        self.assertEqual(wallet_account("owner").destination_msisdn, "+256745938576")
 
     def test_expired_session_is_logged_out(self):
         self.client.force_login(self.owner)
@@ -69,7 +78,7 @@ class PrivilegedSecurityTests(APITestCase):
 
     def test_five_invalid_codes_exhaust_challenge(self):
         self.client.force_login(self.owner)
-        otp = self.code("destination", destination="0749471777")
+        otp = self.code("password")
         for _ in range(5):
-            self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0749471777", "otp": "wrong"}, format="json").status_code, 400)
-        self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "destination", "destination": "0749471777", "otp": otp}, format="json").status_code, 400)
+            self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "password", "new_password": "a-secure-new-password", "otp": "wrong"}, format="json").status_code, 400)
+        self.assertEqual(self.client.post("/api/v1/auth/security/", {"action": "password", "new_password": "a-secure-new-password", "otp": otp}, format="json").status_code, 400)

@@ -32,7 +32,7 @@ def binding_for(request, purpose):
         except (InvalidOperation, ValueError, TypeError):
             raise ValidationError({"amount": "Enter a valid withdrawal amount."})
         return str(value)
-    if purpose == "destination":
+    if purpose in {"destination", "owner_destination"}:
         from catalog.serializers import normalize_ugandan_msisdn
         return normalize_ugandan_msisdn(request.data.get("destination", ""))
     return purpose
