@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial, WalletAccount, WalletLedgerEntry
+from .models import FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial, WalletAccount, WalletLedgerEntry
 
 
 @admin.register(Package)
@@ -9,6 +9,14 @@ class PackageAdmin(admin.ModelAdmin):
     list_filter = ["is_active", "package_type", "closes_at"]
     search_fields = ["name", "code", "betslip_link"]
     readonly_fields = ["image_optimized", "paid_image_optimized"]
+
+
+@admin.register(FreePick)
+class FreePickAdmin(admin.ModelAdmin):
+    list_display = ["name", "package_type", "closes_at", "is_active", "is_live", "win_probability", "code"]
+    list_filter = ["is_active", "package_type", "closes_at"]
+    search_fields = ["name", "code", "betslip_link"]
+    readonly_fields = ["created_by", "created_at", "updated_at"]
 
 
 @admin.register(Purchase)

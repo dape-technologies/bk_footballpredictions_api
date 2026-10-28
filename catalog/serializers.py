@@ -3,7 +3,7 @@ import re
 from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
-from .models import Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
+from .models import FreePick, Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
 from .payment_pricing import payment_quote
 
 
@@ -118,6 +118,43 @@ class PackageSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(errors)
         attrs["currency"] = currency
         return attrs
+
+
+class PublicFreePickSerializer(serializers.ModelSerializer):
+    reveal_image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FreePick
+        fields = [
+            "id", "name", "package_type", "win_probability", "closes_at",
+            "betslip_link", "code", "reveal_image_url",
+        ]
+
+    def get_reveal_image_url(self, obj):
+        request = self.context.get("request")
+        path = "/api/v1/free-pick/image/"
+        return request.build_absolute_uri(path) if request else path
+
+
+class OwnerFreePickSerializer(serializers.ModelSerializer):
+    reveal_image_url = serializers.SerializerMethodField()
+    is_live = serializers.ReadOnlyField()
+
+    class Meta:
+        model = FreePick
+        fields = [
+            "id", "name", "package_type", "win_probability", "closes_at",
+            "betslip_link", "code", "reveal_image", "reveal_image_url",
+            "is_active", "is_live", "created_at", "updated_at",
+        ]
+        extra_kwargs = {
+            "reveal_image": {"write_only": True, "required": True},
+        }
+
+    def get_reveal_image_url(self, obj):
+        request = self.context.get("request")
+        path = f"/api/v1/owner/free-picks/{obj.pk}/reveal-image/"
+        return request.build_absolute_uri(path) if request else path
 
 
 class PaymentSerializer(serializers.ModelSerializer):
