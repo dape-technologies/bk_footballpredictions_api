@@ -29,7 +29,7 @@ from accounts.permissions import IsDeveloper, IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
 from accounts.throttles import PayoutRateThrottle
-from .models import Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial
+from .models import FreePick, Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial
 from .payment_pricing import payment_quote
 from .payment_services import (
     PaymentVerificationError,
@@ -48,6 +48,8 @@ from .serializers import (
     PaymentAlertSerializer,
     PaymentDetailSerializer,
     PaymentSerializer,
+    OwnerFreePickSerializer,
+    PublicFreePickSerializer,
     PublicPackageSerializer,
     PredictionSerializer,
     PurchaseCreateSerializer,
@@ -96,6 +98,40 @@ class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
                 output_field=IntegerField(),
             )
         ).order_by("open_order", "display_order", "price", "name")
+
+
+def active_free_pick():
+    return (
+        FreePick.objects.filter(
+            is_active=True,
+            closes_at__gt=timezone.now(),
+        )
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+
+
+class PublicFreePickView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        package = active_free_pick()
+        if not package:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(PublicFreePickSerializer(package, context={"request": request}).data)
+
+
+class PublicFreePickImageView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        package = active_free_pick()
+        if not package:
+            raise Http404("No free pick is live right now.")
+        response = paid_image_response(package.reveal_image.name, package.reveal_image.storage)
+        response["Cache-Control"] = "no-store, private"
+        response["Pragma"] = "no-cache"
+        return response
 
 
 class PublicPredictionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -873,6 +909,36 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
             metadata={"package_id": package.pk, "package_name": package.name},
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OwnerFreePickViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
+    queryset = FreePick.objects.all()
+    serializer_class = OwnerFreePickSerializer
+    permission_classes = [IsProductOwner]
+
+    def deactivate_other_free_picks(self, free_pick):
+        if free_pick.is_active:
+            FreePick.objects.filter(is_active=True).exclude(pk=free_pick.pk).update(
+                is_active=False,
+                updated_at=timezone.now(),
+            )
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        free_pick = serializer.save(created_by=self.request.user)
+        self.deactivate_other_free_picks(free_pick)
+        self.record_change(free_pick, "created")
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        free_pick = serializer.save()
+        self.deactivate_other_free_picks(free_pick)
+        self.record_change(free_pick, "updated")
+
+    @action(detail=True, methods=["get"], url_path="reveal-image")
+    def reveal_image(self, request, pk=None):
+        free_pick = self.get_object()
+        return paid_image_response(free_pick.reveal_image.name, free_pick.reveal_image.storage)
 
 
 class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):

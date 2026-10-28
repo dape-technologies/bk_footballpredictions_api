@@ -22,6 +22,7 @@ class OwnerRolePermissionTests(APITestCase):
         "/api/v1/owner/dashboard/",
         "/api/v1/owner/activities/",
         "/api/v1/owner/packages/",
+        "/api/v1/owner/free-picks/",
         "/api/v1/owner/payments/",
         "/api/v1/owner/payments/report/",
         "/api/v1/owner/payment-alerts/",

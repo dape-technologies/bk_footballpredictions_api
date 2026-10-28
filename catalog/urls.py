@@ -9,6 +9,7 @@ from .views import (
     OwnerActivityViewSet,
     OwnerCustomerViewSet,
     OwnerDashboardView,
+    OwnerFreePickViewSet,
     OwnerPackageViewSet,
     OwnerPaymentAlertViewSet,
     OwnerPaymentViewSet,
@@ -20,6 +21,8 @@ from .views import (
     PaymentReceiptView,
     PaymentRefreshView,
     PublicPerformanceView,
+    PublicFreePickView,
+    PublicFreePickImageView,
     PublicPackageViewSet,
     PublicPredictionViewSet,
     PublicRecentWinViewSet,
@@ -45,6 +48,7 @@ public_router.register("testimonials", PublicTestimonialViewSet, basename="testi
 
 owner_router = DefaultRouter()
 owner_router.register("packages", OwnerPackageViewSet, basename="owner-package")
+owner_router.register("free-picks", OwnerFreePickViewSet, basename="owner-free-pick")
 owner_router.register("payments", OwnerPaymentViewSet, basename="owner-payment")
 owner_router.register("payment-alerts", OwnerPaymentAlertViewSet, basename="owner-payment-alert")
 owner_router.register("predictions", OwnerPredictionViewSet, basename="owner-prediction")
@@ -69,6 +73,8 @@ urlpatterns = [
     path("me/payments/<int:pk>/receipt/", PaymentReceiptView.as_view(), name="payment-receipt"),
     path("payments/relworx/webhook/", RelworxWebhookView.as_view(), name="relworx-webhook"),
     path("performance/", PublicPerformanceView.as_view(), name="public-performance"),
+    path("free-pick/", PublicFreePickView.as_view(), name="public-free-pick"),
+    path("free-pick/image/", PublicFreePickImageView.as_view(), name="public-free-pick-image"),
     path("owner/dashboard/", OwnerDashboardView.as_view(), name="owner-dashboard"),
     path("owner/performance/", OwnerPerformanceView.as_view(), name="owner-performance"),
     path("owner/wallet/", OwnerWalletView.as_view(), name="owner-wallet"),

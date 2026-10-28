@@ -14,6 +14,11 @@ def paid_package_image_upload_to(instance, filename):
     return f"packages/paid/{uuid4().hex}{suffix}"
 
 
+def free_pick_image_upload_to(instance, filename):
+    suffix = Path(filename).suffix.lower()[:10]
+    return f"free-picks/{uuid4().hex}{suffix}"
+
+
 class Package(models.Model):
     image_optimized = models.ImageField(upload_to="packages/optimized/", blank=True, null=True, editable=False)
     paid_image_optimized = models.ImageField(
@@ -53,6 +58,42 @@ class Package(models.Model):
     @property
     def is_open(self):
         return self.is_active and self.deleted_at is None and self.closes_at > timezone.now()
+
+    def __str__(self):
+        return self.name
+
+
+class FreePick(models.Model):
+    name = models.CharField(max_length=100)
+    package_type = models.CharField(max_length=80, default="Accumulator")
+    win_probability = models.PositiveSmallIntegerField(
+        default=70,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+    closes_at = models.DateTimeField()
+    betslip_link = models.URLField(max_length=500)
+    code = models.CharField(max_length=120)
+    reveal_image = models.ImageField(
+        storage=PrivatePackageStorage(),
+        upload_to=free_pick_image_upload_to,
+    )
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="created_free_picks",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    @property
+    def is_live(self):
+        return self.is_active and self.closes_at > timezone.now()
 
     def __str__(self):
         return self.name
