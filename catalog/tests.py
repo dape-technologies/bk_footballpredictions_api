@@ -763,6 +763,33 @@ class DeveloperConsoleTests(APITestCase):
         self.assertIn("packages", response.data)
         self.assertNotIn("support", response.data)
 
+    def test_developer_analytics_tracks_only_todays_commission(self):
+        account = wallet_account("developer")
+        WalletLedgerEntry.objects.create(
+            wallet_account=account,
+            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
+            amount=Decimal("750"),
+            idempotency_key="commission-today",
+        )
+        yesterday_entry = WalletLedgerEntry.objects.create(
+            wallet_account=account,
+            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
+            amount=Decimal("250"),
+            idempotency_key="commission-yesterday",
+        )
+        WalletLedgerEntry.objects.filter(pk=yesterday_entry.pk).update(
+            created_at=timezone.now() - timedelta(days=1),
+        )
+
+        self.client.force_login(self.developer)
+        analytics = self.client.get("/api/v1/developer/analytics/")
+        wallet = self.client.get("/api/v1/developer/wallet/")
+
+        self.assertEqual(analytics.status_code, 200)
+        self.assertEqual(analytics.data["commission"]["today_earned"], Decimal("750"))
+        self.assertEqual(wallet.status_code, 200)
+        self.assertEqual(wallet.data["wallet"]["today_credited"], Decimal("750"))
+
     def test_gateway_configuration_only_contains_relworx(self):
         self.client.force_login(self.developer)
         response = self.client.get("/api/v1/developer/payment-gateway/")
