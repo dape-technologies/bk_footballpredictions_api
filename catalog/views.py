@@ -757,7 +757,7 @@ class DeveloperAnalyticsView(APIView):
             "commission": {
                 "enabled": settings.DEVELOPER_COMMISSION_RATE > 0,
                 "ratio": settings.DEVELOPER_COMMISSION_RATE,
-                "today_earned": developer_wallet["today_credited"],
+                "today_earned": developer_wallet["today_earned"],
                 "total_earned": commission_total,
                 "wallet_credited": developer_wallet["credited"],
                 "available": developer_wallet["available"],
