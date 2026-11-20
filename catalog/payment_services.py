@@ -136,6 +136,9 @@ def apply_relworx_result(payment, payload, *, source):
         if str(payload.get("currency", "")).upper() != payment.currency.upper():
             raise PaymentVerificationError("currency")
         if payment.status == Payment.Status.PAID:
+            # A repeated provider success is also an opportunity to repair a
+            # missing wallet credit. accrue_payment is idempotent by payment.
+            accrue_payment(payment)
             record_payment_event(payment, "provider.success_duplicate", source=source, payload=payload)
             return payment
 

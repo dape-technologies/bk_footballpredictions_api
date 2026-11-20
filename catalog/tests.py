@@ -14,7 +14,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from .models import Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, WalletLedgerEntry
-from .wallet_services import wallet_account
+from .wallet_services import accrue_payment, wallet_account
 
 
 class OwnerRolePermissionTests(APITestCase):
@@ -338,6 +338,35 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(payment.base_amount, Decimal("10000"))
         self.assertEqual(payment.provider_fee_estimate, payment.amount - payment.base_amount)
         self.assertEqual(WalletLedgerEntry.objects.filter(payment=payment).count(), 2)
+
+    def test_duplicate_success_repairs_a_missing_commission_credit(self):
+        _, payment = self.start_payment()
+        self.assertEqual(self.signed_webhook(payment).status_code, 200)
+        payment.refresh_from_db()
+        WalletLedgerEntry.objects.filter(
+            payment=payment,
+            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
+        ).delete()
+
+        response = self.signed_webhook(payment)
+
+        self.assertEqual(response.status_code, 200)
+        repaired = WalletLedgerEntry.objects.get(
+            payment=payment,
+            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
+        )
+        self.assertEqual(repaired.amount, payment.developer_commission)
+
+    def test_reconcile_wallet_credits_repairs_missing_entries(self):
+        _, payment = self.start_payment()
+        self.assertEqual(self.signed_webhook(payment).status_code, 200)
+        WalletLedgerEntry.objects.filter(payment=payment).delete()
+        output = StringIO()
+
+        call_command("reconcile_wallet_credits", stdout=output)
+
+        self.assertEqual(WalletLedgerEntry.objects.filter(payment=payment).count(), 2)
+        self.assertIn("repaired 1", output.getvalue())
 
     @patch("catalog.payment_services.check_mobile_money_payment")
     def test_status_refresh_recovers_a_missed_success_webhook(self, mocked_check):
@@ -764,21 +793,30 @@ class DeveloperConsoleTests(APITestCase):
         self.assertNotIn("support", response.data)
 
     def test_developer_analytics_tracks_only_todays_commission(self):
-        account = wallet_account("developer")
-        WalletLedgerEntry.objects.create(
-            wallet_account=account,
-            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
-            amount=Decimal("750"),
-            idempotency_key="commission-today",
-        )
-        yesterday_entry = WalletLedgerEntry.objects.create(
-            wallet_account=account,
-            entry_type=WalletLedgerEntry.Type.COMMISSION_CREDIT,
-            amount=Decimal("250"),
-            idempotency_key="commission-yesterday",
-        )
-        WalletLedgerEntry.objects.filter(pk=yesterday_entry.pk).update(
-            created_at=timezone.now() - timedelta(days=1),
+        customer = User.objects.create_user(phone="0704555003", password="pass")
+
+        def create_paid_payment(slug, amount, commission, confirmed_at):
+            package = Package.objects.create(
+                name=slug.title(), slug=slug, package_type="Accumulator",
+                description="Commission test", price=amount, win_probability=75,
+                closes_at=timezone.now() + timedelta(hours=2),
+            )
+            purchase = Purchase.objects.create(
+                user=customer, package=package, price_snapshot=amount,
+            )
+            payment = Payment.objects.create(
+                purchase=purchase, user=customer, package=package,
+                amount=amount, base_amount=amount, provider_net_amount=amount,
+                developer_commission=commission, status=Payment.Status.PAID,
+                payer_msisdn="+256700000003", paid_at=confirmed_at,
+                confirmed_at=confirmed_at,
+            )
+            accrue_payment(payment)
+
+        create_paid_payment("today-commission", Decimal("3750"), Decimal("750"), timezone.now())
+        create_paid_payment(
+            "yesterday-commission", Decimal("1250"), Decimal("250"),
+            timezone.now() - timedelta(days=1),
         )
 
         self.client.force_login(self.developer)
@@ -788,6 +826,7 @@ class DeveloperConsoleTests(APITestCase):
         self.assertEqual(analytics.status_code, 200)
         self.assertEqual(analytics.data["commission"]["today_earned"], Decimal("750"))
         self.assertEqual(wallet.status_code, 200)
+        self.assertEqual(wallet.data["wallet"]["today_earned"], Decimal("750"))
         self.assertEqual(wallet.data["wallet"]["today_credited"], Decimal("750"))
 
     def test_gateway_configuration_only_contains_relworx(self):

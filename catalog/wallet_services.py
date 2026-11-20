@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, time as datetime_time, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
@@ -18,15 +19,42 @@ def wallet_account(beneficiary, provider="relworx", currency="UGX"):
     )[0]
 
 
+def current_local_day_bounds():
+    local_date = timezone.localdate()
+    current_timezone = timezone.get_current_timezone()
+    start = timezone.make_aware(datetime.combine(local_date, datetime_time.min), current_timezone)
+    return start, start + timedelta(days=1)
+
+
+def today_commission_earned():
+    start, end = current_local_day_bounds()
+    return Payment.objects.filter(
+        status=Payment.Status.PAID,
+        confirmed_at__gte=start,
+        confirmed_at__lt=end,
+    ).aggregate(total=Sum("developer_commission"))["total"] or Decimal("0")
+
+
 def accrue_payment(payment):
     payment.refresh_from_db()
     if payment.status != Payment.Status.PAID:
         return
     base = payment.base_amount if payment.base_amount is not None else payment.amount
     net = payment.provider_net_amount if payment.provider_net_amount is not None else payment.amount
-    commission = min(net, (base * settings.DEVELOPER_COMMISSION_RATE).quantize(Decimal("0.01")))
-    owner_amount = max(Decimal("0"), net - commission)
     with transaction.atomic():
+        existing_commission = WalletLedgerEntry.objects.filter(
+            idempotency_key=f"payment:{payment.pk}:developer",
+        ).first()
+        if existing_commission:
+            commission = existing_commission.amount
+        elif payment.developer_commission > 0:
+            commission = payment.developer_commission
+        else:
+            commission = min(
+                net,
+                (base * settings.DEVELOPER_COMMISSION_RATE).quantize(Decimal("0.01")),
+            )
+        owner_amount = max(Decimal("0"), net - commission)
         if owner_amount:
             WalletLedgerEntry.objects.get_or_create(
                 idempotency_key=f"payment:{payment.pk}:owner",
@@ -59,13 +87,16 @@ def wallet_summary(beneficiary):
     available = entries.aggregate(total=Sum("amount"))["total"] or 0
     available -= account.payout_requests.filter(status__in=["pending", "processing"]).count() * Decimal("1500")
     reserved = account.payout_requests.filter(status__in=[PayoutRequest.Status.PENDING, PayoutRequest.Status.PROCESSING]).aggregate(total=Sum("amount"))["total"] or 0
-    today = entries.filter(
+    start, end = current_local_day_bounds()
+    today_credited = entries.filter(
         entry_type__in=[WalletLedgerEntry.Type.PAYMENT_CREDIT, WalletLedgerEntry.Type.COMMISSION_CREDIT],
-        created_at__date=timezone.localdate(),
+        created_at__gte=start,
+        created_at__lt=end,
     ).aggregate(total=Sum("amount"))["total"] or 0
     return {
         "provider": account.provider, "currency": account.currency,
-        "today_credited": today, "credited": credited, "reserved": reserved,
+        "today_earned": today_commission_earned() if beneficiary == WalletAccount.Beneficiary.DEVELOPER else today_credited,
+        "today_credited": today_credited, "credited": credited, "reserved": reserved,
         "available": max(Decimal("0"), available),
     }
 

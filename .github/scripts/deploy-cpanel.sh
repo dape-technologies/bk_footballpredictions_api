@@ -97,6 +97,7 @@ mv -- "$env_tmp" "$production_env"
 env_tmp=""
 
 cd "$app_root"
+python manage.py reconcile_wallet_credits
 python manage.py ensure_admin
 python manage.py ensure_developer
 python manage.py collectstatic --noinput --clear
