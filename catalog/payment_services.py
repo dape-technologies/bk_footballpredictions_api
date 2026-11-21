@@ -6,7 +6,9 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from .models import Payment, PaymentAlert, PaymentEvent
+from accounts.models import User
+
+from .models import Payment, PaymentAlert, PaymentEvent, Purchase, SubscriptionOrder
 from .relworx import RelworxError, check_mobile_money_payment
 from .wallet_services import accrue_payment
 
@@ -99,8 +101,19 @@ def _validate_identifiers(payment, payload):
     return internal_reference
 
 
+@transaction.atomic
 def apply_relworx_result(payment, payload, *, source):
-    """Apply a provider result to a locked Payment instance."""
+    """Apply a provider result with locks around the payment and its entitlement."""
+    payment = Payment.objects.select_for_update().select_related(
+        "purchase__package", "subscription_order__plan", "user",
+    ).get(pk=payment.pk)
+    if payment.purchase_id:
+        payment.purchase = Purchase.objects.select_for_update().select_related("package").get(pk=payment.purchase_id)
+    else:
+        User.objects.select_for_update().get(pk=payment.user_id)
+        payment.subscription_order = SubscriptionOrder.objects.select_for_update().select_related("plan").get(
+            pk=payment.subscription_order_id,
+        )
     provider_status = str(payload.get("status") or payload.get("request_status") or "").lower()
     internal_reference = _validate_identifiers(payment, payload)
     now = timezone.now()
@@ -143,6 +156,27 @@ def apply_relworx_result(payment, payload, *, source):
             return payment
 
         completed_at = parse_datetime(str(payload.get("completed_at", ""))) or now
+        if payment.purchase_id:
+            primary = Payment.objects.filter(
+                purchase_id=payment.purchase_id, status=Payment.Status.PAID,
+            ).exclude(pk=payment.pk).order_by("confirmed_at", "id").first()
+        else:
+            primary = Payment.objects.filter(
+                subscription_order__user_id=payment.user_id,
+                subscription_order__paid_at__isnull=False,
+                subscription_order__access_starts_at__lte=now,
+                subscription_order__access_ends_at__gt=now,
+                status=Payment.Status.PAID,
+            ).exclude(pk=payment.pk).order_by("confirmed_at", "id").first()
+            if not primary:
+                primary = Payment.objects.filter(
+                    subscription_order_id=payment.subscription_order_id,
+                    status=Payment.Status.PAID,
+                ).exclude(pk=payment.pk).order_by("confirmed_at", "id").first()
+        if primary:
+            payment.settlement_classification = Payment.SettlementClassification.DUPLICATE
+            payment.duplicate_of = primary
+            updates.extend(["settlement_classification", "duplicate_of"])
         payment.status = Payment.Status.PAID
         payment.paid_at = completed_at
         payment.confirmed_at = completed_at
@@ -156,15 +190,31 @@ def apply_relworx_result(payment, payload, *, source):
             "failure_category", "failure_code", "failure_reason", "failed_at",
         ])
         payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
-        if payment.purchase_id:
-            payment.purchase.complete(completed_at)
-        else:
-            payment.subscription_order.complete(completed_at)
+        if not primary:
+            if payment.purchase_id:
+                payment.purchase.complete(completed_at)
+            else:
+                payment.subscription_order.complete(completed_at)
         payment.issue_receipt()
         accrue_payment(payment)
         payment.alerts.filter(resolved_at__isnull=True).update(resolved_at=now)
         record_payment_event(payment, "payment.confirmed", source=source, payload=payload)
-        if payment.purchase_id:
+        if primary:
+            record_payment_event(
+                payment,
+                "payment.duplicate_entitlement_settlement",
+                source=source,
+                message=f"Entitlement was already satisfied by {primary.reference}.",
+                payload=payload,
+            )
+            create_payment_alert(
+                payment,
+                "duplicate-entitlement-settlement",
+                "Duplicate entitlement payment confirmed",
+                f"{payment.reference} was credited normally, but access was already satisfied by {primary.reference}.",
+                severity=PaymentAlert.Severity.CRITICAL,
+            )
+        elif payment.purchase_id:
             from .analytics_services import record_confirmation
             record_confirmation(payment)
         return payment

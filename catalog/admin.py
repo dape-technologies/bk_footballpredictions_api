@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from .models import (
-    FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction,
+    FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, ReconciliationRun,
     Purchase, RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan,
     Testimonial, WalletAccount, WalletLedgerEntry,
 )
@@ -44,11 +44,11 @@ class RecentWinAdmin(admin.ModelAdmin):
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
-    list_display = ["reference", "user", "product_name", "amount", "currency", "status", "failure_category", "confirmed_at", "created_at"]
-    list_filter = ["status", "failure_category", "provider", "currency", "created_at"]
+    list_display = ["reference", "user", "product_name", "amount", "currency", "status", "settlement_classification", "failure_category", "confirmed_at", "created_at"]
+    list_filter = ["status", "settlement_classification", "failure_category", "provider", "currency", "created_at"]
     search_fields = ["reference", "internal_reference", "provider_transaction_id", "receipt_number", "user__phone", "package__name"]
     readonly_fields = [
-        "purchase", "subscription_order", "user", "package", "amount", "currency", "status", "reference",
+        "purchase", "subscription_order", "duplicate_of", "settlement_classification", "user", "package", "amount", "currency", "status", "reference",
         "internal_reference", "provider", "provider_transaction_id", "provider_charge",
         "payer_msisdn", "provider_message", "provider_payload", "failure_category",
         "failure_code", "failure_reason", "failed_at", "submitted_at", "confirmed_at",
@@ -71,6 +71,13 @@ class PaymentAlertAdmin(admin.ModelAdmin):
     list_filter = ["severity", "resolved_at"]
     search_fields = ["alert_key", "title", "message", "payment__reference"]
     readonly_fields = ["payment", "alert_key", "severity", "title", "message", "created_at"]
+
+
+@admin.register(ReconciliationRun)
+class ReconciliationRunAdmin(admin.ModelAdmin):
+    list_display = ["job", "status", "started_at", "finished_at", "scanned_count"]
+    list_filter = ["job", "status"]
+    readonly_fields = ["job", "status", "started_at", "finished_at", "scanned_count", "outcomes", "error_summary"]
 
 
 @admin.register(WalletAccount)
