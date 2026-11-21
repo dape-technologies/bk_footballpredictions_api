@@ -28,6 +28,12 @@ Change production credentials and never run the demo seed in production.
 
 Premium response fields are removed by the API unless the requester owns a verified paid purchase for the prediction's package. Package codes and links are snapshotted when Relworx confirms payment and remain available permanently.
 
+## Weekly subscriptions
+
+The owner can configure the seven-day offer at `/api/v1/owner/subscription-plan/` and mark package uploads as `weekly` content. Confirmed subscription payments create an exact 168-hour access window; active subscribers receive all currently open weekly content plus new weekly uploads. Protected images, betslip links, and weekly prediction fields re-check the live entitlement on every request and lock immediately at expiry. Existing `one_off` packages retain permanent paid access.
+
+Customer subscription endpoints are under `/api/v1/me/subscriptions/`, with the active content feed at `/api/v1/me/weekly-content/`. The local demo seed enables a UGX 12,000 Weekly Plan and creates one weekly content item for manual testing.
+
 ## Relworx configuration
 
 Copy the values from `.env.example` into the deployment environment. Configure the exact HTTPS value of `RELWORX_WEBHOOK_URL` as the Request Payment Webhook in the matching Relworx business account. A browser response never unlocks a package; only a valid signed webhook can complete a purchase.

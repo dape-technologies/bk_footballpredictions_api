@@ -35,15 +35,15 @@
       <div><dt>Payment date</dt><dd>{{ payment.confirmed_at|date:"d M Y, H:i T" }}</dd></div>
       <div><dt>Customer</dt><dd>{{ payment.user.full_name }}</dd></div>
       <div><dt>Customer phone</dt><dd>{{ payment.user.phone }}</dd></div>
-      <div><dt>Package</dt><dd>{{ payment.package.name }}</dd></div>
+      <div><dt>Product</dt><dd>{{ payment.product_name }}</dd></div>
       <div><dt>Payment provider</dt><dd>{{ payment.provider }}</dd></div>
       <div><dt>BK reference</dt><dd>{{ payment.reference }}</dd></div>
       <div><dt>Provider reference</dt><dd>{{ payment.internal_reference|default:"Not supplied" }}</dd></div>
     </dl>
-    {% if payment.base_amount %}<dl class="grid"><div><dt>Package price</dt><dd>{{ payment.currency }} {{ payment.base_amount }}</dd></div><div><dt>Provider fee</dt><dd>{{ payment.currency }} {{ payment.provider_charge|default:payment.provider_fee_estimate }}</dd></div></dl>{% endif %}
+    {% if payment.base_amount %}<dl class="grid"><div><dt>Access price</dt><dd>{{ payment.currency }} {{ payment.base_amount }}</dd></div><div><dt>Provider fee</dt><dd>{{ payment.currency }} {{ payment.provider_charge|default:payment.provider_fee_estimate }}</dd></div></dl>{% endif %}
     <div class="total"><span>Total paid</span><strong>{{ payment.currency }} {{ payment.amount }}</strong></div>
     <footer>
-      <p>This receipt confirms payment for access to the named BK package. Keep the receipt number when contacting support.</p>
+      <p>This receipt confirms payment for the named BK access product. Keep the receipt number when contacting support.</p>
       <p>Generated {{ payment.receipt_issued_at|date:"d M Y, H:i T" }}.</p>
     </footer>
     <p class="print-hint">Use your browser’s Print command to print or save this receipt as PDF.</p>

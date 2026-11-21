@@ -29,7 +29,10 @@ from accounts.permissions import IsDeveloper, IsProductOwner
 from accounts.serializers import ActivityLogSerializer, UserSerializer
 from accounts.services import record_activity
 from accounts.throttles import PayoutRateThrottle
-from .models import FreePick, Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial
+from .models import (
+    FreePick, Package, Payment, PaymentAlert, PayoutRequest, Prediction, Purchase,
+    RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan, Testimonial,
+)
 from .payment_pricing import payment_quote
 from .payment_services import (
     PaymentVerificationError,
@@ -55,7 +58,10 @@ from .serializers import (
     PurchaseCreateSerializer,
     PurchaseSerializer,
     RecentWinSerializer,
+    SubscriptionOrderSerializer,
+    SubscriptionPlanSerializer,
     TestimonialSerializer,
+    WeeklyContentSerializer,
 )
 
 
@@ -91,7 +97,9 @@ class PublicPackageViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         now = timezone.now()
-        return Package.objects.filter(deleted_at__isnull=True, is_active=True).annotate(
+        return Package.objects.filter(
+            deleted_at__isnull=True, is_active=True, offer_type=Package.OfferType.ONE_OFF,
+        ).annotate(
             open_order=Case(
                 When(closes_at__gt=now, then=0),
                 default=1,
@@ -269,6 +277,198 @@ class MyPurchasePaidImageView(APIView):
         return paid_image_response(purchase.paid_image_snapshot, purchase.package.paid_image.storage)
 
 
+def active_subscription_order(user, *, lock=False):
+    queryset = SubscriptionOrder.objects.select_related("plan").filter(
+        user=user,
+        paid_at__isnull=False,
+        access_starts_at__lte=timezone.now(),
+        access_ends_at__gt=timezone.now(),
+    ).order_by("-access_ends_at", "-id")
+    return queryset.select_for_update().first() if lock else queryset.first()
+
+
+class WeeklyPlanView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        plan = SubscriptionPlan.objects.filter(key="weekly", is_active=True).first()
+        if not plan:
+            return Response({"detail": "The Weekly Plan is not available right now."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(SubscriptionPlanSerializer(plan, context={"request": request}).data)
+
+
+class MySubscriptionOrdersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        orders = request.user.subscription_orders.select_related("plan").prefetch_related(
+            "payments__package", "payments__subscription_order__plan", "payments__user",
+        )
+        return Response(SubscriptionOrderSerializer(orders, many=True, context={"request": request}).data)
+
+    def post(self, request):
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
+            if active_subscription_order(request.user, lock=True):
+                return Response(
+                    {"detail": "Your Weekly Plan is still active. You can renew after it expires."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            plan = SubscriptionPlan.objects.select_for_update().filter(key="weekly", is_active=True).first()
+            if not plan:
+                return Response({"detail": "The Weekly Plan is not available right now."}, status=status.HTTP_409_CONFLICT)
+            order = request.user.subscription_orders.filter(
+                plan=plan,
+                paid_at__isnull=True,
+                price_snapshot=plan.price,
+                currency_snapshot=plan.currency,
+                duration_days_snapshot=plan.duration_days,
+                initiated_at__gte=timezone.now() - timedelta(hours=24),
+            ).order_by("-initiated_at").first()
+            created = order is None
+            if created:
+                order = SubscriptionOrder.objects.create(
+                    user=request.user,
+                    plan=plan,
+                    price_snapshot=plan.price,
+                    currency_snapshot=plan.currency,
+                    duration_days_snapshot=plan.duration_days,
+                )
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="subscription.checkout_opened",
+            description=f"{request.user.full_name} opened checkout for {plan.name}.",
+            target=order,
+        )
+        order = SubscriptionOrder.objects.select_related("plan").prefetch_related(
+            "payments__package", "payments__subscription_order__plan", "payments__user",
+        ).get(pk=order.pk)
+        return Response(
+            SubscriptionOrderSerializer(order, context={"request": request}).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class MySubscriptionOrderDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        order = request.user.subscription_orders.select_related("plan").prefetch_related(
+            "payments__package", "payments__subscription_order__plan", "payments__user",
+        ).filter(pk=pk).first()
+        if not order:
+            return Response({"detail": "Subscription order not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(SubscriptionOrderSerializer(order, context={"request": request}).data)
+
+
+class MyWeeklyContentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        order = active_subscription_order(request.user)
+        if not order:
+            return Response({"detail": "An active Weekly Plan is required."}, status=status.HTTP_403_FORBIDDEN)
+        packages = Package.objects.filter(
+            subscription_grants__order=order,
+            offer_type=Package.OfferType.WEEKLY,
+            deleted_at__isnull=True,
+            is_active=True,
+        ).distinct().order_by("-created_at", "-id")
+        return Response(WeeklyContentSerializer(packages, many=True, context={"request": request}).data)
+
+
+class MyWeeklyContentPaidImageView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        order = active_subscription_order(request.user)
+        package = Package.objects.filter(
+            pk=pk, offer_type=Package.OfferType.WEEKLY, deleted_at__isnull=True, is_active=True,
+            subscription_grants__order=order,
+        ).first() if order else None
+        if not package:
+            raise Http404("Weekly content not found.")
+        image = package.paid_image_optimized or package.paid_image
+        return paid_image_response(image.name if image else "", package.paid_image.storage)
+
+
+class WeeklyContentAccessView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        order = active_subscription_order(request.user)
+        package = Package.objects.filter(
+            pk=pk, offer_type=Package.OfferType.WEEKLY, deleted_at__isnull=True, is_active=True,
+            subscription_grants__order=order,
+        ).first() if order else None
+        if not package:
+            return Response({"detail": "Active Weekly Plan access is required."}, status=status.HTTP_403_FORBIDDEN)
+        return Response({"url": package.betslip_link})
+
+
+class SubscriptionPaymentAttemptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        serializer = PaymentAttemptSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            order = SubscriptionOrder.objects.select_for_update().select_related("plan").filter(pk=pk, user=request.user).first()
+            if not order:
+                return Response({"detail": "Subscription order not found."}, status=status.HTTP_404_NOT_FOUND)
+            if order.is_paid:
+                return Response({"detail": "This subscription order has already been paid."}, status=status.HTTP_409_CONFLICT)
+            if active_subscription_order(request.user, lock=True):
+                return Response({"detail": "Your Weekly Plan is still active."}, status=status.HTTP_409_CONFLICT)
+            if not order.plan.is_active:
+                return Response({"detail": "The Weekly Plan is not available right now."}, status=status.HTTP_409_CONFLICT)
+            if order.payments.filter(status__in=Payment.ACTIVE_STATUSES).exists():
+                return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
+            quote = payment_quote(order.price_snapshot)
+            if quote["total_charge"] > Decimal("5000000"):
+                return Response({"detail": "The plan price plus provider fee exceeds the Relworx limit."}, status=status.HTTP_409_CONFLICT)
+            payment = Payment.objects.create(
+                subscription_order=order,
+                user=request.user,
+                amount=quote["total_charge"],
+                base_amount=quote["base_amount"],
+                provider_fee_estimate=quote["provider_fee_estimate"],
+                provider_net_amount=quote["base_amount"],
+                currency=order.currency_snapshot,
+                payer_msisdn=serializer.validated_data["phone"],
+                status=Payment.Status.SUBMITTED,
+                submitted_at=timezone.now(),
+                reconciliation_next_at=timezone.now() + timedelta(minutes=2),
+            )
+            record_payment_event(payment, "payment.created", source="subscription_checkout", message="Subscription payment attempt created.")
+            record_payment_event(payment, "payment.submitted", source="subscription_checkout", message="Payment request submitted to Relworx.")
+        try:
+            provider_response = request_mobile_money_payment(payment)
+        except RelworxError as error:
+            payment.provider_message = str(error)[:240]
+            payment.failure_category = Payment.FailureCategory.SYSTEM if error.uncertain else Payment.FailureCategory.PROVIDER
+            payment.failure_code = str(error.code or error.status_code or "initiation_error")[:80]
+            payment.failure_reason = str(error)
+            fields = ["provider_message", "failure_category", "failure_code", "failure_reason", "updated_at"]
+            if not error.uncertain:
+                payment.status = Payment.Status.FAILED
+                payment.failed_at = timezone.now()
+                payment.reconciliation_next_at = None
+                fields += ["status", "failed_at", "reconciliation_next_at"]
+            payment.save(update_fields=fields)
+            record_payment_event(payment, "payment.initiation_uncertain" if error.uncertain else "payment.initiation_failed", source="subscription_checkout", message=str(error))
+            if error.uncertain:
+                return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
+            return Response({"detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+        payment.internal_reference = str(provider_response["internal_reference"])
+        payment.status = Payment.Status.PENDING
+        payment.provider_message = str(provider_response.get("message", "Payment request sent."))[:240]
+        payment.save(update_fields=["internal_reference", "status", "provider_message", "updated_at"])
+        record_payment_event(payment, "payment.pending", source="subscription_checkout", message=payment.provider_message, payload=provider_response)
+        return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
+
+
 class PaymentAttemptView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -404,13 +604,13 @@ class PaymentRefreshView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        payment = Payment.objects.select_related("purchase__package", "package", "user").filter(pk=pk, user=request.user).first()
+        payment = Payment.objects.select_related("purchase__package", "subscription_order__plan", "package", "user").filter(pk=pk, user=request.user).first()
         if not payment:
             return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
         if payment.status not in (Payment.Status.SUBMITTED, Payment.Status.PENDING):
             return Response(PaymentSerializer(payment, context={"request": request}).data)
         reconciled, outcome = reconcile_payment(payment.pk, source="customer_refresh")
-        reconciled = Payment.objects.select_related("purchase__package", "package", "user").get(pk=reconciled.pk)
+        reconciled = Payment.objects.select_related("purchase__package", "subscription_order__plan", "package", "user").get(pk=reconciled.pk)
         response_status = status.HTTP_400_BAD_REQUEST if outcome == "mismatch" else status.HTTP_200_OK
         return Response(PaymentSerializer(reconciled, context={"request": request}).data, status=response_status)
 
@@ -419,7 +619,7 @@ class PaymentReceiptView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        payment = Payment.objects.select_related("user", "package", "purchase").filter(pk=pk).first()
+        payment = Payment.objects.select_related("user", "package", "purchase", "subscription_order__plan").filter(pk=pk).first()
         if not payment or (payment.user_id != request.user.id and not request.user.is_product_owner):
             return Response({"detail": "Receipt not found."}, status=status.HTTP_404_NOT_FOUND)
         if payment.status != Payment.Status.PAID:
@@ -449,7 +649,7 @@ class RelworxWebhookView(APIView):
             return Response({"detail": "Invalid webhook signature."}, status=status.HTTP_401_UNAUTHORIZED)
 
         with transaction.atomic():
-            payment = Payment.objects.select_for_update().select_related("purchase__package").filter(reference=reference).first()
+            payment = Payment.objects.select_for_update().select_related("purchase__package", "subscription_order__plan").filter(reference=reference).first()
             if not payment:
                 payout = PayoutRequest.objects.select_for_update().filter(reference=reference).first()
                 if payout:
@@ -637,7 +837,7 @@ class DeveloperAnalyticsView(APIView):
         month_start = timezone.make_aware(datetime.combine(local_now.date().replace(day=1), datetime_time.min))
         chart_start = today_start - timedelta(days=29)
 
-        payments = Payment.objects.select_related("package", "user")
+        payments = Payment.objects.select_related("package", "subscription_order__plan", "user")
         paid = payments.filter(status=Payment.Status.PAID)
         today_attempts = payments.filter(created_at__gte=today_start)
         today_paid = paid.filter(confirmed_at__gte=today_start)
@@ -650,8 +850,12 @@ class DeveloperAnalyticsView(APIView):
         }
         by_package = {
             row["package__name"]: row["amount"] or Decimal("0")
-            for row in paid.values("package__name").annotate(amount=Sum("amount")).order_by("package__name")
+            for row in paid.filter(package__isnull=False).values("package__name").annotate(amount=Sum("amount")).order_by("package__name")
         }
+        for row in paid.filter(subscription_order__isnull=False).values(
+            "subscription_order__plan__name",
+        ).annotate(amount=Sum("amount")):
+            by_package[row["subscription_order__plan__name"]] = row["amount"] or Decimal("0")
         by_provider = {
             (row["provider"] or "relworx"): {"count": row["count"], "amount": row["amount"] or Decimal("0")}
             for row in paid.values("provider").annotate(count=Count("id"), amount=Sum("amount"))
@@ -671,7 +875,7 @@ class DeveloperAnalyticsView(APIView):
             recent_payments.append({
                 "id": payment.pk,
                 "amount": payment.amount,
-                "package": payment.package.name,
+                "package": payment.product_name,
                 "status": payment.status,
                 "provider": payment.provider,
                 "phone": masked_phone,
@@ -767,7 +971,7 @@ class DeveloperAnalyticsView(APIView):
                 "recent": [
                     {
                         "id": payment.pk, "payment_reference": payment.reference,
-                        "package": payment.package.name, "amount": payment.amount,
+                        "package": payment.product_name, "amount": payment.amount,
                         "commission": payment.developer_commission,
                         "confirmed_at": payment.confirmed_at,
                     }
@@ -858,8 +1062,12 @@ class OwnerDashboardView(APIView):
             "active_packages": Package.objects.filter(
                 deleted_at__isnull=True,
                 is_active=True,
+                offer_type=Package.OfferType.ONE_OFF,
                 closes_at__gt=now,
             ).count(),
+            "active_subscribers": SubscriptionOrder.objects.filter(
+                paid_at__isnull=False, access_starts_at__lte=now, access_ends_at__gt=now,
+            ).values("user_id").distinct().count(),
             "pending_payments": Payment.objects.filter(status__in=[Payment.Status.SUBMITTED, Payment.Status.PENDING]).count(),
             "payments_needing_review": Payment.objects.filter(status=Payment.Status.NEEDS_REVIEW).count(),
             "open_payment_alerts": PaymentAlert.objects.filter(resolved_at__isnull=True).count(),
@@ -892,6 +1100,39 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     serializer_class = PackageSerializer
     permission_classes = [IsProductOwner]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        offer_type = self.request.query_params.get("offer_type")
+        if offer_type in Package.OfferType.values:
+            queryset = queryset.filter(offer_type=offer_type)
+        return queryset
+
+    @staticmethod
+    def grant_to_active_subscribers(package):
+        if (
+            package.offer_type != Package.OfferType.WEEKLY
+            or not package.is_active
+            or package.deleted_at
+            or package.closes_at <= timezone.now()
+        ):
+            return
+        now = timezone.now()
+        orders = SubscriptionOrder.objects.filter(
+            paid_at__isnull=False, access_starts_at__lte=now, access_ends_at__gt=now,
+        )
+        SubscriptionContentGrant.objects.bulk_create(
+            [SubscriptionContentGrant(order=order, package=package) for order in orders],
+            ignore_conflicts=True,
+        )
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        self.grant_to_active_subscribers(serializer.instance)
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        self.grant_to_active_subscribers(serializer.instance)
+
     @action(detail=True, methods=["get"], url_path="paid-image")
     def paid_image(self, request, pk=None):
         package = self.get_object()
@@ -910,6 +1151,34 @@ class OwnerPackageViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
             metadata={"package_id": package.pk, "package_name": package.name},
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class OwnerSubscriptionPlanView(APIView):
+    permission_classes = [IsProductOwner]
+
+    @staticmethod
+    def get_plan():
+        return SubscriptionPlan.objects.get_or_create(
+            key="weekly",
+            defaults={"name": "Weekly Plan", "price": 1000, "currency": "UGX", "duration_days": 7, "is_active": False},
+        )[0]
+
+    def get(self, request):
+        return Response(SubscriptionPlanSerializer(self.get_plan(), context={"request": request}).data)
+
+    def patch(self, request):
+        plan = self.get_plan()
+        serializer = SubscriptionPlanSerializer(plan, data=request.data, partial=True, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save(duration_days=7)
+        record_activity(
+            request,
+            category=ActivityLog.Category.SUBSCRIPTION,
+            action="subscription_plan.updated",
+            description=f"{request.user.full_name} updated the Weekly Plan.",
+            target=plan,
+        )
+        return Response(serializer.data)
 
 
 class OwnerFreePickViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
@@ -943,7 +1212,7 @@ class OwnerFreePickViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
 
 
 class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Payment.objects.select_related("user", "package", "purchase").all()
+    queryset = Payment.objects.select_related("user", "package", "purchase", "subscription_order__plan").all()
     serializer_class = PaymentSerializer
     permission_classes = [IsProductOwner]
 
@@ -974,6 +1243,7 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 | Q(user__first_name__icontains=search)
                 | Q(user__last_name__icontains=search)
                 | Q(package__name__icontains=search)
+                | Q(subscription_order__plan__name__icontains=search)
             )
         if start_at:
             queryset = queryset.filter(created_at__gte=start_at)
@@ -994,7 +1264,16 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         commissions = paid.aggregate(value=Sum("developer_commission"))["value"] or Decimal("0")
         by_status = list(queryset.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status"))
         by_provider = list(queryset.values("provider").annotate(count=Count("id"), amount=Sum("amount")).order_by("provider"))
-        by_package = list(queryset.values("package_id", "package__name").annotate(count=Count("id"), amount=Sum("amount")).order_by("package__name"))
+        by_package = list(queryset.filter(package__isnull=False).values("package_id", "package__name").annotate(count=Count("id"), amount=Sum("amount")).order_by("package__name"))
+        subscription_rows = queryset.filter(subscription_order__isnull=False).values(
+            "subscription_order__plan_id", "subscription_order__plan__name",
+        ).annotate(count=Count("id"), amount=Sum("amount"))
+        by_package.extend({
+            "package_id": None,
+            "package__name": row["subscription_order__plan__name"],
+            "count": row["count"],
+            "amount": row["amount"],
+        } for row in subscription_rows)
         failures = list(
             queryset.exclude(failure_category="")
             .values("failure_category")
@@ -1037,7 +1316,7 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         for payment in self.filter_queryset(self.get_queryset()).iterator():
             writer.writerow([
                 payment.reference, payment.internal_reference, payment.provider_transaction_id,
-                payment.user.full_name, payment.user.phone, payment.package.name,
+                payment.user.full_name, payment.user.phone, payment.product_name,
                 payment.base_amount or payment.amount, payment.amount, payment.currency,
                 payment.status, payment.provider, payment.provider_fee_estimate or "",
                 payment.provider_charge or "", payment.provider_net_amount or "",

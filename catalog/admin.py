@@ -1,12 +1,16 @@
 from django.contrib import admin
 
-from .models import FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, Purchase, RecentWin, Testimonial, WalletAccount, WalletLedgerEntry
+from .models import (
+    FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction,
+    Purchase, RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan,
+    Testimonial, WalletAccount, WalletLedgerEntry,
+)
 
 
 @admin.register(Package)
 class PackageAdmin(admin.ModelAdmin):
-    list_display = ["name", "package_type", "price", "closes_at", "is_active", "is_open", "win_probability", "code"]
-    list_filter = ["is_active", "package_type", "closes_at"]
+    list_display = ["name", "offer_type", "package_type", "price", "closes_at", "is_active", "is_open", "win_probability", "code"]
+    list_filter = ["offer_type", "is_active", "package_type", "closes_at"]
     search_fields = ["name", "code", "betslip_link"]
     readonly_fields = ["image_optimized", "paid_image_optimized"]
 
@@ -28,6 +32,7 @@ class PurchaseAdmin(admin.ModelAdmin):
 
 
 admin.site.register([Prediction, Testimonial])
+admin.site.register([SubscriptionPlan, SubscriptionOrder, SubscriptionContentGrant])
 
 
 @admin.register(RecentWin)
@@ -39,11 +44,11 @@ class RecentWinAdmin(admin.ModelAdmin):
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
-    list_display = ["reference", "user", "package", "amount", "currency", "status", "failure_category", "confirmed_at", "created_at"]
+    list_display = ["reference", "user", "product_name", "amount", "currency", "status", "failure_category", "confirmed_at", "created_at"]
     list_filter = ["status", "failure_category", "provider", "currency", "created_at"]
     search_fields = ["reference", "internal_reference", "provider_transaction_id", "receipt_number", "user__phone", "package__name"]
     readonly_fields = [
-        "purchase", "user", "package", "amount", "currency", "status", "reference",
+        "purchase", "subscription_order", "user", "package", "amount", "currency", "status", "reference",
         "internal_reference", "provider", "provider_transaction_id", "provider_charge",
         "payer_msisdn", "provider_message", "provider_payload", "failure_category",
         "failure_code", "failure_reason", "failed_at", "submitted_at", "confirmed_at",

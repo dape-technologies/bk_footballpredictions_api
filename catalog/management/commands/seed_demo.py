@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from accounts.models import User
-from catalog.models import Package, Prediction, RecentWin, Testimonial
+from catalog.models import Package, Prediction, RecentWin, SubscriptionPlan, Testimonial
 
 
 class Command(BaseCommand):
@@ -28,11 +28,23 @@ class Command(BaseCommand):
         ]
         package_objects = []
         now = timezone.now()
+        SubscriptionPlan.objects.update_or_create(
+            key="weekly",
+            defaults={
+                "name": "Weekly Plan",
+                "description": "Seven days of access to every current and newly uploaded weekly package.",
+                "price": 12000,
+                "currency": "UGX",
+                "duration_days": 7,
+                "is_active": True,
+            },
+        )
         for order, (name, slug, package_type, price, probability, closes_in, code, featured) in enumerate(packages):
             package, _ = Package.objects.update_or_create(
                 slug=slug,
                 defaults={
                     "name": name,
+                    "offer_type": Package.OfferType.ONE_OFF,
                     "package_type": package_type,
                     "price": price,
                     "win_probability": probability,
@@ -44,6 +56,22 @@ class Command(BaseCommand):
                 },
             )
             package_objects.append(package)
+
+        Package.objects.update_or_create(
+            slug="weekly-subscriber-board",
+            defaults={
+                "name": "Weekly Subscriber Board",
+                "offer_type": Package.OfferType.WEEKLY,
+                "package_type": "Accumulator",
+                "price": 0,
+                "win_probability": 80,
+                "closes_at": now + timedelta(hours=30),
+                "betslip_link": "https://example.com/betslip/weekly-subscriber-board",
+                "code": "BK-WEEK-80",
+                "is_active": True,
+                "display_order": 0,
+            },
+        )
 
         predictions = [
             ("Arsenal", "Newcastle", "Premier League", 4, "free", None, "Total goals", "Over 1.5", "1.42", 76, "Both teams have produced high-volume final-third entries across their recent fixtures."),

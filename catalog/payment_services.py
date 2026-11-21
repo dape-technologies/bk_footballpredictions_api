@@ -156,13 +156,17 @@ def apply_relworx_result(payment, payload, *, source):
             "failure_category", "failure_code", "failure_reason", "failed_at",
         ])
         payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
-        payment.purchase.complete(completed_at)
+        if payment.purchase_id:
+            payment.purchase.complete(completed_at)
+        else:
+            payment.subscription_order.complete(completed_at)
         payment.issue_receipt()
         accrue_payment(payment)
         payment.alerts.filter(resolved_at__isnull=True).update(resolved_at=now)
         record_payment_event(payment, "payment.confirmed", source=source, payload=payload)
-        from .analytics_services import record_confirmation
-        record_confirmation(payment)
+        if payment.purchase_id:
+            from .analytics_services import record_confirmation
+            record_confirmation(payment)
         return payment
 
     if provider_status in {"failed", "failure", "declined", "cancelled", "canceled"}:
@@ -235,7 +239,7 @@ def record_verification_mismatch(payment, error, *, source, payload=None):
 
 def reconcile_payment(payment_id, *, max_attempts=12, max_age_hours=24, source="scheduled_reconciliation"):
     with transaction.atomic():
-        payment = Payment.objects.select_for_update().select_related("purchase__package").get(pk=payment_id)
+        payment = Payment.objects.select_for_update().select_related("purchase__package", "subscription_order__plan").get(pk=payment_id)
         if payment.status not in (Payment.Status.SUBMITTED, Payment.Status.PENDING):
             return payment, "skipped"
         now = timezone.now()
@@ -280,7 +284,7 @@ def reconcile_payment(payment_id, *, max_attempts=12, max_age_hours=24, source="
             return payment, "error"
 
     with transaction.atomic():
-        payment = Payment.objects.select_for_update().select_related("purchase__package").get(pk=payment_id)
+        payment = Payment.objects.select_for_update().select_related("purchase__package", "subscription_order__plan").get(pk=payment_id)
         try:
             apply_relworx_result(payment, result, source=source)
         except PaymentVerificationError as error:

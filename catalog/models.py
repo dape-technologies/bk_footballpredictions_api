@@ -1,5 +1,6 @@
 from uuid import uuid4
 from pathlib import Path
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -20,6 +21,10 @@ def free_pick_image_upload_to(instance, filename):
 
 
 class Package(models.Model):
+    class OfferType(models.TextChoices):
+        ONE_OFF = "one_off", "One-off package"
+        WEEKLY = "weekly", "Weekly plan content"
+
     image_optimized = models.ImageField(upload_to="packages/optimized/", blank=True, null=True, editable=False)
     paid_image_optimized = models.ImageField(
         storage=PrivatePackageStorage(), upload_to="packages/paid/optimized/",
@@ -27,6 +32,7 @@ class Package(models.Model):
     )
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=120, unique=True)
+    offer_type = models.CharField(max_length=16, choices=OfferType.choices, default=OfferType.ONE_OFF, db_index=True)
     package_type = models.CharField(max_length=80, default="Accumulator")
     description = models.TextField(blank=True, default="")
     price = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
@@ -144,6 +150,97 @@ class Purchase(models.Model):
         return f"{self.user} · {self.package}"
 
 
+class SubscriptionPlan(models.Model):
+    key = models.SlugField(max_length=40, unique=True, default="weekly")
+    name = models.CharField(max_length=100, default="Weekly Plan")
+    description = models.TextField(blank=True, default="Seven days of access to every weekly subscriber package.")
+    price = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(500)])
+    currency = models.CharField(max_length=8, default="UGX")
+    duration_days = models.PositiveSmallIntegerField(default=7, validators=[MinValueValidator(1)])
+    is_active = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["key"]
+
+    def __str__(self):
+        return self.name
+
+
+class SubscriptionOrder(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="subscription_orders")
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT, related_name="orders")
+    price_snapshot = models.DecimalField(max_digits=12, decimal_places=0)
+    currency_snapshot = models.CharField(max_length=8, default="UGX")
+    duration_days_snapshot = models.PositiveSmallIntegerField(default=7)
+    initiated_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(blank=True, null=True)
+    access_starts_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    access_ends_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-initiated_at", "-id"]
+
+    @property
+    def is_paid(self):
+        return self.paid_at is not None
+
+    @property
+    def is_active(self):
+        now = timezone.now()
+        return bool(self.access_starts_at and self.access_ends_at and self.access_starts_at <= now < self.access_ends_at)
+
+    @property
+    def status(self):
+        if self.is_active:
+            return "active"
+        if self.is_paid:
+            return "expired"
+        cached = getattr(self, "_prefetched_objects_cache", {}).get("payments")
+        latest = max(cached, key=lambda item: (item.created_at, item.id)) if cached else self.payments.order_by("-created_at", "-id").first()
+        return latest.status if latest else "unpaid"
+
+    def complete(self, paid_at=None):
+        if self.is_paid:
+            return False
+        starts_at = paid_at or timezone.now()
+        self.paid_at = starts_at
+        self.access_starts_at = starts_at
+        self.access_ends_at = starts_at + timedelta(days=self.duration_days_snapshot)
+        self.save(update_fields=["paid_at", "access_starts_at", "access_ends_at", "updated_at"])
+        eligible = Package.objects.filter(
+            offer_type=Package.OfferType.WEEKLY,
+            deleted_at__isnull=True,
+            is_active=True,
+            closes_at__gt=starts_at,
+        )
+        SubscriptionContentGrant.objects.bulk_create(
+            [SubscriptionContentGrant(order=self, package=package) for package in eligible],
+            ignore_conflicts=True,
+        )
+        return True
+
+    def __str__(self):
+        return f"{self.user} · {self.plan} · {self.status}"
+
+
+class SubscriptionContentGrant(models.Model):
+    order = models.ForeignKey(SubscriptionOrder, on_delete=models.PROTECT, related_name="content_grants")
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="subscription_grants")
+    granted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-granted_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(fields=["order", "package"], name="unique_subscription_content_grant"),
+        ]
+
+    def __str__(self):
+        return f"{self.order} · {self.package}"
+
+
 def payment_reference():
     return f"BKP-{uuid4().hex[:12].upper()}"
 
@@ -172,9 +269,12 @@ class Payment(models.Model):
     ACTIVE_STATUSES = (Status.CREATED, Status.SUBMITTED, Status.PENDING, Status.NEEDS_REVIEW)
     TERMINAL_STATUSES = (Status.PAID, Status.FAILED, Status.EXPIRED, Status.CANCELLED)
 
-    purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="payments")
+    purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="payments", blank=True, null=True)
+    subscription_order = models.ForeignKey(
+        SubscriptionOrder, on_delete=models.PROTECT, related_name="payments", blank=True, null=True,
+    )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="payments")
-    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments")
+    package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments", blank=True, null=True)
     amount = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
     base_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     provider_fee_estimate = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
@@ -211,6 +311,23 @@ class Payment(models.Model):
             models.Index(fields=["status", "created_at"], name="payment_status_created_idx"),
             models.Index(fields=["failure_category", "failed_at"], name="payment_failure_idx"),
         ]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(purchase__isnull=False, subscription_order__isnull=True)
+                    | models.Q(purchase__isnull=True, subscription_order__isnull=False)
+                ),
+                name="payment_has_one_checkout_target",
+            ),
+        ]
+
+    @property
+    def product_name(self):
+        if self.package_id:
+            return self.package.name
+        if self.subscription_order_id:
+            return self.subscription_order.plan.name
+        return "BK access"
 
     def issue_receipt(self):
         if self.status != self.Status.PAID:

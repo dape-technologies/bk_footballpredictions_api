@@ -1,9 +1,13 @@
 import re
 
+from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.serializers import UserSerializer
-from .models import FreePick, Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase, RecentWin, Testimonial
+from .models import (
+    FreePick, Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase,
+    RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan, Testimonial,
+)
 from .payment_pricing import payment_quote
 
 
@@ -32,7 +36,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Package
         fields = [
-            "id", "name", "slug", "package_type", "price", "currency",
+            "id", "name", "slug", "offer_type", "package_type", "price", "currency",
             "win_probability", "closes_at", "image_url", "is_active", "is_open",
             "payment_total", "payment_fee",
         ]
@@ -81,7 +85,7 @@ class PackageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Package
         fields = [
-            "id", "name", "slug", "package_type", "description", "price", "currency",
+            "id", "name", "slug", "offer_type", "package_type", "description", "price", "currency",
             "win_probability", "closes_at", "betslip_link", "code", "access_label",
             "benefits", "image", "image_url", "paid_image", "paid_image_url",
             "is_featured", "display_order",
@@ -107,11 +111,49 @@ class PackageSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(path) if request else path
 
     def validate(self, attrs):
+        offer_type = attrs.get("offer_type", getattr(self.instance, "offer_type", Package.OfferType.ONE_OFF))
         currency = str(attrs.get("currency", getattr(self.instance, "currency", "UGX"))).upper()
         price = attrs.get("price", getattr(self.instance, "price", None))
         errors = {}
         if currency != "UGX":
             errors["currency"] = "Mobile-money checkout currently supports UGX packages only."
+        if offer_type == Package.OfferType.ONE_OFF and price is not None and not 500 <= price <= 5000000:
+            errors["price"] = "Relworx accepts UGX payments from 500 to 5,000,000."
+        if self.instance and offer_type != self.instance.offer_type:
+            if self.instance.purchases.exists() or self.instance.subscription_grants.exists():
+                errors["offer_type"] = "Clone this package to change its offer type after access has been issued."
+        if errors:
+            raise serializers.ValidationError(errors)
+        if offer_type == Package.OfferType.WEEKLY:
+            attrs["price"] = 0
+        attrs["currency"] = currency
+        return attrs
+
+
+class SubscriptionPlanSerializer(serializers.ModelSerializer):
+    payment_total = serializers.SerializerMethodField()
+    payment_fee = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubscriptionPlan
+        fields = [
+            "id", "key", "name", "description", "price", "currency", "duration_days",
+            "is_active", "payment_total", "payment_fee", "updated_at",
+        ]
+        read_only_fields = ["id", "key", "duration_days", "payment_total", "payment_fee", "updated_at"]
+
+    def get_payment_total(self, obj):
+        return payment_quote(obj.price)["total_charge"]
+
+    def get_payment_fee(self, obj):
+        return payment_quote(obj.price)["provider_fee_estimate"]
+
+    def validate(self, attrs):
+        currency = str(attrs.get("currency", getattr(self.instance, "currency", "UGX"))).upper()
+        price = attrs.get("price", getattr(self.instance, "price", None))
+        errors = {}
+        if currency != "UGX":
+            errors["currency"] = "Mobile-money checkout currently supports UGX only."
         if price is not None and not 500 <= price <= 5000000:
             errors["price"] = "Relworx accepts UGX payments from 500 to 5,000,000."
         if errors:
@@ -162,11 +204,13 @@ class PaymentSerializer(serializers.ModelSerializer):
     package = PublicPackageSerializer(read_only=True)
     receipt_url = serializers.SerializerMethodField()
     customer_message = serializers.SerializerMethodField()
+    product_name = serializers.ReadOnlyField()
+    checkout_type = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
         fields = [
-            "id", "reference", "internal_reference", "user", "package", "amount",
+            "id", "reference", "internal_reference", "user", "package", "product_name", "checkout_type", "amount",
             "base_amount", "provider_fee_estimate", "provider_net_amount", "developer_commission",
             "currency", "status", "provider", "payer_msisdn", "provider_message",
             "provider_transaction_id", "provider_charge", "failure_category",
@@ -175,6 +219,9 @@ class PaymentSerializer(serializers.ModelSerializer):
             "receipt_issued_at", "receipt_url", "customer_message", "paid_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+    def get_checkout_type(self, obj):
+        return "subscription" if obj.subscription_order_id else "package"
 
     def get_receipt_url(self, obj):
         if obj.status != Payment.Status.PAID:
@@ -185,7 +232,7 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     def get_customer_message(self, obj):
         if obj.status == Payment.Status.PAID:
-            return "Payment confirmed. Your package is ready."
+            return "Payment confirmed. Your access is ready."
         if obj.status in (Payment.Status.CREATED, Payment.Status.SUBMITTED, Payment.Status.PENDING):
             return "Approve the mobile-money prompt on your phone. We will confirm it automatically."
         if obj.status == Payment.Status.EXPIRED or obj.failure_code == "approval_window_expired":
@@ -303,6 +350,8 @@ class PurchaseCreateSerializer(serializers.Serializer):
     )
 
     def validate_package_id(self, package):
+        if package.offer_type != Package.OfferType.ONE_OFF:
+            raise serializers.ValidationError("Weekly content is included through the Weekly Plan.")
         if not package.is_open:
             raise serializers.ValidationError("This package is closed and cannot be purchased.")
         return package
@@ -323,6 +372,52 @@ class PaymentAttemptSerializer(serializers.Serializer):
 
     def validate_phone(self, value):
         return normalize_ugandan_msisdn(value)
+
+
+class SubscriptionOrderSerializer(serializers.ModelSerializer):
+    plan = SubscriptionPlanSerializer(read_only=True)
+    is_paid = serializers.ReadOnlyField()
+    is_active = serializers.ReadOnlyField()
+    status = serializers.ReadOnlyField()
+    latest_payment = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubscriptionOrder
+        fields = [
+            "id", "plan", "price_snapshot", "currency_snapshot", "duration_days_snapshot",
+            "initiated_at", "paid_at", "access_starts_at", "access_ends_at", "is_paid",
+            "is_active", "status", "latest_payment",
+        ]
+        read_only_fields = fields
+
+    def get_latest_payment(self, obj):
+        payments = list(obj.payments.all())
+        payment = max(payments, key=lambda item: (item.created_at, item.id)) if payments else None
+        return PaymentSerializer(payment, context=self.context).data if payment else None
+
+
+class WeeklyContentSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    paid_image_url = serializers.SerializerMethodField()
+    is_open = serializers.ReadOnlyField()
+
+    class Meta:
+        model = Package
+        fields = [
+            "id", "name", "slug", "package_type", "description", "win_probability",
+            "closes_at", "image_url", "paid_image_url", "code", "is_open", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_image_url(self, obj):
+        return media_url(self.context.get("request"), obj.image_optimized or obj.image)
+
+    def get_paid_image_url(self, obj):
+        if not (obj.paid_image_optimized or obj.paid_image):
+            return ""
+        request = self.context.get("request")
+        path = f"/api/v1/me/weekly-content/{obj.pk}/paid-image/"
+        return request.build_absolute_uri(path) if request else path
 
 
 class PredictionSerializer(serializers.ModelSerializer):
@@ -349,6 +444,15 @@ class PredictionSerializer(serializers.ModelSerializer):
             return False
         if request.user.is_staff:
             return True
+        if obj.package and obj.package.offer_type == Package.OfferType.WEEKLY:
+            now = timezone.now()
+            return SubscriptionContentGrant.objects.filter(
+                package=obj.package,
+                order__user=request.user,
+                order__paid_at__isnull=False,
+                order__access_starts_at__lte=now,
+                order__access_ends_at__gt=now,
+            ).exists()
         return Purchase.objects.filter(user=request.user, package=obj.package, paid_at__isnull=False).exists()
 
     def get_locked(self, obj):
