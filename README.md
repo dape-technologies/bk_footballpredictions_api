@@ -67,6 +67,13 @@ python manage.py reconcile_payments --batch-size 100 --max-attempts 12 --max-age
 python manage.py reconcile_payouts --batch-size 100
 ```
 
+Each invocation records a reconciliation run. The owner Payments screen shows
+the latest payment-job health, while the developer gateway console shows both
+payment and payout history. With the default five-minute schedule, a job is
+marked stale after fifteen minutes without a successful run. Configure these
+thresholds with `RECONCILIATION_EXPECTED_INTERVAL_MINUTES` and
+`RECONCILIATION_STALE_AFTER_MINUTES` when the production cron cadence differs.
+
 The command checks submitted or pending attempts whose next-check time has arrived. It uses the Relworx internal reference when available and falls back to the unique BK customer reference after an uncertain initiation response. Exact reference, amount, and currency validation still applies. Repeated provider errors move the payment to `needs_review` and create an owner-visible alert; the command never marks a payment paid without a successful provider response.
 
 ## Wallets, pricing, and payouts

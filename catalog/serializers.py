@@ -6,7 +6,7 @@ from rest_framework import serializers
 from accounts.serializers import UserSerializer
 from .models import (
     FreePick, Package, Payment, PaymentAlert, PaymentEvent, Prediction, Purchase,
-    RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan, Testimonial,
+    RecentWin, ReconciliationRun, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan, Testimonial,
 )
 from .payment_pricing import payment_quote
 
@@ -206,12 +206,14 @@ class PaymentSerializer(serializers.ModelSerializer):
     customer_message = serializers.SerializerMethodField()
     product_name = serializers.ReadOnlyField()
     checkout_type = serializers.SerializerMethodField()
+    duplicate_of_reference = serializers.CharField(source="duplicate_of.reference", read_only=True, default="")
 
     class Meta:
         model = Payment
         fields = [
             "id", "reference", "internal_reference", "user", "package", "product_name", "checkout_type", "amount",
             "base_amount", "provider_fee_estimate", "provider_net_amount", "developer_commission",
+            "settlement_classification", "duplicate_of_reference",
             "currency", "status", "provider", "payer_msisdn", "provider_message",
             "provider_transaction_id", "provider_charge", "failure_category",
             "failure_code", "failure_reason", "submitted_at", "confirmed_at",
@@ -418,6 +420,72 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         path = f"/api/v1/me/weekly-content/{obj.pk}/paid-image/"
         return request.build_absolute_uri(path) if request else path
+
+
+class OwnerWeeklySubscriberSerializer(serializers.ModelSerializer):
+    customer = UserSerializer(source="user", read_only=True)
+    plan_name = serializers.CharField(source="plan.name", read_only=True)
+    available_content_count = serializers.IntegerField(read_only=True)
+    remaining_seconds = serializers.SerializerMethodField()
+    access_status = serializers.SerializerMethodField()
+    content_status = serializers.SerializerMethodField()
+    is_expiring_soon = serializers.SerializerMethodField()
+    payment = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubscriptionOrder
+        fields = [
+            "id", "customer", "plan_name", "price_snapshot", "currency_snapshot",
+            "paid_at", "access_starts_at", "access_ends_at", "remaining_seconds",
+            "access_status", "content_status", "is_expiring_soon",
+            "available_content_count", "payment",
+        ]
+        read_only_fields = fields
+
+    def get_remaining_seconds(self, obj):
+        if not obj.access_ends_at:
+            return 0
+        return max(0, int((obj.access_ends_at - timezone.now()).total_seconds()))
+
+    def get_access_status(self, obj):
+        if obj.user.is_blocked:
+            return "blocked"
+        return "active" if obj.is_active else "expired"
+
+    def get_content_status(self, obj):
+        if obj.user.is_blocked:
+            return "blocked"
+        if not obj.is_active:
+            return "expired"
+        return "available" if obj.available_content_count else "waiting"
+
+    def get_is_expiring_soon(self, obj):
+        remaining = self.get_remaining_seconds(obj)
+        return bool(obj.is_active and 0 < remaining <= 86400)
+
+    def get_payment(self, obj):
+        payments = list(obj.payments.all())
+        paid = [payment for payment in payments if payment.status == Payment.Status.PAID]
+        payment = max(paid, key=lambda item: (item.confirmed_at or item.created_at, item.id)) if paid else None
+        if not payment:
+            return None
+        return {
+            "reference": payment.reference,
+            "amount": payment.amount,
+            "currency": payment.currency,
+            "confirmed_at": payment.confirmed_at,
+            "settlement_classification": payment.settlement_classification,
+        }
+
+
+class ReconciliationRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReconciliationRun
+        fields = [
+            "id", "job", "status", "started_at", "finished_at", "scanned_count",
+            "outcomes", "error_summary",
+        ]
+        read_only_fields = fields
 
 
 class PredictionSerializer(serializers.ModelSerializer):

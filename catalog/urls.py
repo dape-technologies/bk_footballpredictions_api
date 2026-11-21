@@ -19,6 +19,7 @@ from .views import (
     OwnerPaymentViewSet,
     OwnerPerformanceView,
     OwnerSubscriptionPlanView,
+    OwnerWeeklySubscriberView,
     OwnerPredictionViewSet,
     OwnerRecentWinViewSet,
     OwnerTestimonialViewSet,
@@ -46,6 +47,7 @@ from .views import (
     DeveloperCustomerViewSet,
     DeveloperPaymentGatewayView,
     DeveloperPaymentGatewayCheckView,
+    DeveloperReconciliationHealthView,
 )
 
 public_router = DefaultRouter()
@@ -93,6 +95,7 @@ urlpatterns = [
     path("owner/dashboard/", OwnerDashboardView.as_view(), name="owner-dashboard"),
     path("owner/performance/", OwnerPerformanceView.as_view(), name="owner-performance"),
     path("owner/subscription-plan/", OwnerSubscriptionPlanView.as_view(), name="owner-subscription-plan"),
+    path("owner/weekly-subscribers/", OwnerWeeklySubscriberView.as_view(), name="owner-weekly-subscribers"),
     path("owner/wallet/", OwnerWalletView.as_view(), name="owner-wallet"),
     path("owner/payout-requests/", OwnerPayoutRequestView.as_view(), name="owner-payout-request"),
     path("owner/payout-requests/<int:pk>/cancel/", OwnerPayoutCancelView.as_view(), name="owner-payout-cancel"),
@@ -102,6 +105,7 @@ urlpatterns = [
     path("developer/analytics/", DeveloperAnalyticsView.as_view(), name="developer-analytics"),
     path("developer/payment-gateway/", DeveloperPaymentGatewayView.as_view(), name="developer-payment-gateway"),
     path("developer/payment-gateway/relworx/check/", DeveloperPaymentGatewayCheckView.as_view(), name="developer-payment-gateway-check"),
+    path("developer/reconciliation-health/", DeveloperReconciliationHealthView.as_view(), name="developer-reconciliation-health"),
     path("owner/", include(owner_router.urls)),
     path("developer/", include(developer_router.urls)),
 ]

@@ -44,6 +44,7 @@ from .payment_services import (
 )
 from .payout_services import execute_payout, settle_payout
 from .relworx import RelworxError, check_wallet_balance, request_mobile_money_payment
+from .reconciliation_monitoring import reconciliation_health_payload
 from .wallet_services import cancel_payout, create_payout, serialize_payout, wallet_payload, wallet_summary
 from .serializers import (
     PackageSerializer,
@@ -59,6 +60,7 @@ from .serializers import (
     PurchaseSerializer,
     RecentWinSerializer,
     SubscriptionOrderSerializer,
+    OwnerWeeklySubscriberSerializer,
     SubscriptionPlanSerializer,
     TestimonialSerializer,
     WeeklyContentSerializer,
@@ -287,6 +289,18 @@ def active_subscription_order(user, *, lock=False):
     return queryset.select_for_update().first() if lock else queryset.first()
 
 
+def payment_conflict(code, detail, payment=None):
+    payload = {"detail": detail, "code": code}
+    if payment:
+        payload["payment"] = {
+            "id": payment.pk,
+            "reference": payment.reference,
+            "status": payment.status,
+            "customer_message": PaymentSerializer(payment).get_customer_message(payment),
+        }
+    return Response(payload, status=status.HTTP_409_CONFLICT)
+
+
 class WeeklyPlanView(APIView):
     permission_classes = [AllowAny]
 
@@ -414,17 +428,25 @@ class SubscriptionPaymentAttemptView(APIView):
         serializer = PaymentAttemptSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
             order = SubscriptionOrder.objects.select_for_update().select_related("plan").filter(pk=pk, user=request.user).first()
             if not order:
                 return Response({"detail": "Subscription order not found."}, status=status.HTTP_404_NOT_FOUND)
             if order.is_paid:
-                return Response({"detail": "This subscription order has already been paid."}, status=status.HTTP_409_CONFLICT)
+                return payment_conflict("already_paid", "This subscription order has already been paid.")
             if active_subscription_order(request.user, lock=True):
-                return Response({"detail": "Your Weekly Plan is still active."}, status=status.HTTP_409_CONFLICT)
+                return payment_conflict("subscription_active", "Your Weekly Plan is still active.")
             if not order.plan.is_active:
                 return Response({"detail": "The Weekly Plan is not available right now."}, status=status.HTTP_409_CONFLICT)
-            if order.payments.filter(status__in=Payment.ACTIVE_STATUSES).exists():
-                return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
+            blocking = Payment.objects.filter(
+                user=request.user,
+                subscription_order__isnull=False,
+                status__in=Payment.ACTIVE_STATUSES,
+            ).order_by("-created_at", "-id").first()
+            if blocking:
+                code = "payment_needs_review" if blocking.status == Payment.Status.NEEDS_REVIEW else "payment_in_progress"
+                detail = "A previous Weekly Plan payment needs support review." if code == "payment_needs_review" else "A Weekly Plan payment is already in progress. Check its status before trying again."
+                return payment_conflict(code, detail, blocking)
             quote = payment_quote(order.price_snapshot)
             if quote["total_charge"] > Decimal("5000000"):
                 return Response({"detail": "The plan price plus provider fee exceeds the Relworx limit."}, status=status.HTTP_409_CONFLICT)
@@ -480,15 +502,18 @@ class PaymentAttemptView(APIView):
             if not purchase:
                 return Response({"detail": "Purchase not found."}, status=status.HTTP_404_NOT_FOUND)
             if purchase.is_paid:
-                return Response({"detail": "This package has already been purchased."}, status=status.HTTP_409_CONFLICT)
+                return payment_conflict("already_paid", "This package has already been purchased.")
             if not purchase.package.is_open:
                 return Response({"detail": "This package is closed and cannot be purchased."}, status=status.HTTP_409_CONFLICT)
             if purchase.currency_snapshot.upper() != "UGX":
                 return Response({"detail": "Mobile-money checkout currently supports UGX packages only."}, status=status.HTTP_409_CONFLICT)
             if not Decimal("500") <= purchase.price_snapshot <= Decimal("5000000"):
                 return Response({"detail": "Relworx accepts UGX payments from 500 to 5,000,000."}, status=status.HTTP_409_CONFLICT)
-            if purchase.payments.filter(status__in=Payment.ACTIVE_STATUSES).exists():
-                return Response({"detail": "A payment request is already pending."}, status=status.HTTP_409_CONFLICT)
+            blocking = purchase.payments.filter(status__in=Payment.ACTIVE_STATUSES).order_by("-created_at", "-id").first()
+            if blocking:
+                code = "payment_needs_review" if blocking.status == Payment.Status.NEEDS_REVIEW else "payment_in_progress"
+                detail = "This payment needs support review before another attempt." if code == "payment_needs_review" else "A payment request is already in progress. Check its status before trying again."
+                return payment_conflict(code, detail, blocking)
             quote = payment_quote(purchase.price_snapshot)
             if quote["total_charge"] > Decimal("5000000"):
                 return Response({"detail": "The package price plus provider fee exceeds the Relworx transaction limit."}, status=status.HTTP_409_CONFLICT)
@@ -1052,6 +1077,13 @@ class DeveloperPaymentGatewayCheckView(APIView):
         })
 
 
+class DeveloperReconciliationHealthView(APIView):
+    permission_classes = [IsDeveloper]
+
+    def get(self, request):
+        return Response(reconciliation_health_payload(include_history=True))
+
+
 class OwnerDashboardView(APIView):
     permission_classes = [IsProductOwner]
 
@@ -1074,6 +1106,7 @@ class OwnerDashboardView(APIView):
             "paid_payments": Payment.objects.filter(status=Payment.Status.PAID).count(),
             "revenue": Payment.objects.filter(status=Payment.Status.PAID).aggregate(total=Sum("amount"))["total"] or 0,
             "wallet": wallet_summary("owner"),
+            "reconciliation": reconciliation_health_payload(),
             "package_demand": list(
                 Package.objects.filter(deleted_at__isnull=True).annotate(
                     request_count=Count("purchases"),
@@ -1181,6 +1214,69 @@ class OwnerSubscriptionPlanView(APIView):
         return Response(serializer.data)
 
 
+class OwnerWeeklySubscriberView(APIView):
+    permission_classes = [IsProductOwner]
+
+    def get(self, request):
+        now = timezone.now()
+        active_filter = Q(access_starts_at__lte=now, access_ends_at__gt=now)
+        queryset = SubscriptionOrder.objects.filter(paid_at__isnull=False).select_related(
+            "user", "plan",
+        ).prefetch_related(
+            "payments__duplicate_of",
+        ).annotate(
+            available_content_count=Count(
+                "content_grants",
+                filter=Q(
+                    content_grants__package__offer_type=Package.OfferType.WEEKLY,
+                    content_grants__package__deleted_at__isnull=True,
+                    content_grants__package__is_active=True,
+                    content_grants__package__closes_at__gt=now,
+                ),
+                distinct=True,
+            ),
+        )
+        summary = {
+            "active": queryset.filter(active_filter).values("user_id").distinct().count(),
+            "waiting": queryset.filter(active_filter, user__is_blocked=False, available_content_count=0).values("user_id").distinct().count(),
+            "available": queryset.filter(active_filter, user__is_blocked=False, available_content_count__gt=0).values("user_id").distinct().count(),
+            "expiring": queryset.filter(
+                active_filter, user__is_blocked=False, access_ends_at__lte=now + timedelta(days=1),
+            ).values("user_id").distinct().count(),
+        }
+        selected_status = request.query_params.get("status", "active")
+        filters = {
+            "active": active_filter,
+            "waiting": active_filter & Q(user__is_blocked=False, available_content_count=0),
+            "available": active_filter & Q(user__is_blocked=False, available_content_count__gt=0),
+            "expiring": active_filter & Q(user__is_blocked=False, access_ends_at__lte=now + timedelta(days=1)),
+            "expired": Q(access_ends_at__lte=now),
+        }
+        if selected_status not in filters:
+            return Response({"detail": "Choose a supported subscriber status."}, status=status.HTTP_400_BAD_REQUEST)
+        queryset = queryset.filter(filters[selected_status])
+        search = request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(user__phone__icontains=search)
+                | Q(user__first_name__icontains=search)
+                | Q(user__last_name__icontains=search)
+            )
+        queryset = queryset.annotate(
+            waiting_rank=Case(
+                When(user__is_blocked=False, available_content_count=0, then=0),
+                default=1,
+                output_field=IntegerField(),
+            )
+        ).order_by("waiting_rank", "access_ends_at", "id")
+        return Response({
+            "generated_at": now,
+            "status": selected_status,
+            "summary": summary,
+            "results": OwnerWeeklySubscriberSerializer(queryset, many=True, context={"request": request}).data,
+        })
+
+
 class OwnerFreePickViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
     queryset = FreePick.objects.all()
     serializer_class = OwnerFreePickSerializer
@@ -1212,7 +1308,7 @@ class OwnerFreePickViewSet(OwnerAuditMixin, viewsets.ModelViewSet):
 
 
 class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Payment.objects.select_related("user", "package", "purchase", "subscription_order__plan").all()
+    queryset = Payment.objects.select_related("user", "package", "purchase", "subscription_order__plan", "duplicate_of").all()
     serializer_class = PaymentSerializer
     permission_classes = [IsProductOwner]
 
@@ -1226,6 +1322,7 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
         status_filter = self.request.query_params.get("status", "").strip()
         provider = self.request.query_params.get("provider", "").strip()
         failure_category = self.request.query_params.get("failure_category", "").strip()
+        settlement = self.request.query_params.get("settlement", "").strip()
         search = self.request.query_params.get("search", "").strip()
         _, _, start_at, end_at = _date_bounds(self.request)
         if status_filter:
@@ -1234,6 +1331,8 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(provider__iexact=provider)
         if failure_category:
             queryset = queryset.filter(failure_category=failure_category)
+        if settlement in Payment.SettlementClassification.values:
+            queryset = queryset.filter(settlement_classification=settlement)
         if search:
             queryset = queryset.filter(
                 Q(reference__icontains=search)
@@ -1296,6 +1395,7 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 "owner_net": gross - fees - commissions,
                 "pending": queryset.filter(status__in=[Payment.Status.SUBMITTED, Payment.Status.PENDING]).count(),
                 "needs_review": queryset.filter(status=Payment.Status.NEEDS_REVIEW).count(),
+                "duplicate_settlements": paid.filter(settlement_classification=Payment.SettlementClassification.DUPLICATE).count(),
             },
             "by_status": by_status,
             "by_provider": by_provider,
@@ -1312,6 +1412,7 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
             "Package", "Package price", "Customer charge", "Currency", "Status", "Provider",
             "Estimated fee", "Actual provider fee", "Provider net", "Developer commission",
             "Failure category", "Failure reason", "Created", "Confirmed",
+            "Settlement classification", "Original payment",
         ])
         for payment in self.filter_queryset(self.get_queryset()).iterator():
             writer.writerow([
@@ -1323,6 +1424,8 @@ class OwnerPaymentViewSet(viewsets.ReadOnlyModelViewSet):
                 payment.developer_commission,
                 payment.failure_category, payment.failure_reason, payment.created_at.isoformat(),
                 payment.confirmed_at.isoformat() if payment.confirmed_at else "",
+                payment.settlement_classification,
+                payment.duplicate_of.reference if payment.duplicate_of_id else "",
             ])
         response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = 'attachment; filename="bk-payments.csv"'

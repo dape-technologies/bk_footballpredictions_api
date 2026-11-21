@@ -250,6 +250,10 @@ def receipt_number():
 
 
 class Payment(models.Model):
+    class SettlementClassification(models.TextChoices):
+        PRIMARY = "primary", "Primary"
+        DUPLICATE = "duplicate", "Duplicate entitlement settlement"
+
     class Status(models.TextChoices):
         CREATED = "created", "Created"
         SUBMITTED = "submitted", "Submitted"
@@ -273,6 +277,9 @@ class Payment(models.Model):
     subscription_order = models.ForeignKey(
         SubscriptionOrder, on_delete=models.PROTECT, related_name="payments", blank=True, null=True,
     )
+    duplicate_of = models.ForeignKey(
+        "self", on_delete=models.PROTECT, related_name="duplicate_settlements", blank=True, null=True,
+    )
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="payments")
     package = models.ForeignKey(Package, on_delete=models.PROTECT, related_name="payments", blank=True, null=True)
     amount = models.DecimalField(max_digits=12, decimal_places=0, validators=[MinValueValidator(0)])
@@ -282,6 +289,10 @@ class Payment(models.Model):
     developer_commission = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     currency = models.CharField(max_length=8, default="UGX")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.CREATED, db_index=True)
+    settlement_classification = models.CharField(
+        max_length=16, choices=SettlementClassification.choices,
+        default=SettlementClassification.PRIMARY, db_index=True,
+    )
     reference = models.CharField(max_length=24, unique=True, default=payment_reference, editable=False)
     internal_reference = models.CharField(max_length=80, blank=True, null=True, unique=True)
     provider = models.CharField(max_length=40, default="relworx")
@@ -389,6 +400,33 @@ class PaymentAlert(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class ReconciliationRun(models.Model):
+    class Job(models.TextChoices):
+        PAYMENTS = "payments", "Payments"
+        PAYOUTS = "payouts", "Payouts"
+
+    class Status(models.TextChoices):
+        RUNNING = "running", "Running"
+        SUCCESS = "success", "Success"
+        DEGRADED = "degraded", "Degraded"
+        FAILED = "failed", "Failed"
+
+    job = models.CharField(max_length=20, choices=Job.choices, db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.RUNNING, db_index=True)
+    started_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    finished_at = models.DateTimeField(blank=True, null=True, db_index=True)
+    scanned_count = models.PositiveIntegerField(default=0)
+    outcomes = models.JSONField(default=dict, blank=True)
+    error_summary = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
+        indexes = [models.Index(fields=["job", "status", "finished_at"], name="reconcile_job_status_idx")]
+
+    def __str__(self):
+        return f"{self.job} · {self.status} · {self.started_at}"
 
 
 def payout_reference():
