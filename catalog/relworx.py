@@ -60,7 +60,7 @@ def request_mobile_money_payment(payment):
         "msisdn": payment.payer_msisdn,
         "currency": payment.currency,
         "amount": float(payment.amount),
-        "description": f"{payment.package.name} betting package",
+        "description": f"{payment.product_name} access",
     }
     result = _authenticated_request(url, data=payload, method="POST")
 
