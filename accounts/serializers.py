@@ -3,7 +3,8 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import ActivityLog, User
+from .models import ActivityLog, RecoveryProfile, User
+from .recovery import recovery_hashes, validate_recovery_pair
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -12,12 +13,13 @@ class UserSerializer(serializers.ModelSerializer):
     is_owner = serializers.SerializerMethodField()
     is_developer = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
+    recovery_configured = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id", "phone", "first_name", "surname", "full_name", "date_of_birth",
-            "roles", "is_owner", "is_developer", "is_blocked", "created_at",
+            "roles", "is_owner", "is_developer", "is_blocked", "recovery_configured", "created_at",
         ]
         read_only_fields = fields
 
@@ -33,15 +35,25 @@ class UserSerializer(serializers.ModelSerializer):
             roles.insert(0, "Product Owner")
         return roles or ["Customer"]
 
+    def get_recovery_configured(self, obj):
+        if obj.is_product_owner or obj.is_developer:
+            return True
+        return RecoveryProfile.objects.filter(user=obj).exists()
+
 
 class RegisterSerializer(serializers.ModelSerializer):
     surname = serializers.CharField(source="last_name", max_length=150)
     password = serializers.CharField(write_only=True, min_length=4, trim_whitespace=False)
     password_confirm = serializers.CharField(write_only=True, min_length=4, trim_whitespace=False)
+    recovery_private_phrase = serializers.CharField(write_only=True, trim_whitespace=False)
+    recovery_life_phrase = serializers.CharField(write_only=True, trim_whitespace=False)
 
     class Meta:
         model = User
-        fields = ["first_name", "surname", "date_of_birth", "phone", "password", "password_confirm"]
+        fields = [
+            "first_name", "surname", "date_of_birth", "phone", "password", "password_confirm",
+            "recovery_private_phrase", "recovery_life_phrase",
+        ]
 
     def validate_first_name(self, value):
         value = " ".join(value.split())
@@ -78,13 +90,32 @@ class RegisterSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError({"password_confirm": "The passwords do not match."})
+        private_phrase, life_phrase = validate_recovery_pair(
+            attrs["recovery_private_phrase"],
+            attrs["recovery_life_phrase"],
+            user_values=(
+                attrs.get("first_name"), attrs.get("last_name"), attrs.get("date_of_birth"),
+                attrs.get("phone"), attrs.get("password"),
+            ),
+        )
+        attrs["recovery_private_phrase"] = private_phrase
+        attrs["recovery_life_phrase"] = life_phrase
         return attrs
 
     def create(self, validated_data):
         validated_data.pop("password_confirm")
+        private_phrase = validated_data.pop("recovery_private_phrase")
+        life_phrase = validated_data.pop("recovery_life_phrase")
         try:
             with transaction.atomic():
-                return User.objects.create_user(**validated_data)
+                user = User.objects.create_user(**validated_data)
+                private_hash, life_hash = recovery_hashes(private_phrase, life_phrase)
+                RecoveryProfile.objects.create(
+                    user=user,
+                    private_phrase_hash=private_hash,
+                    life_phrase_hash=life_hash,
+                )
+                return user
         except IntegrityError:
             raise serializers.ValidationError({"phone": "This phone number is already registered."})
 

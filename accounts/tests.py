@@ -7,9 +7,9 @@ from django.core.cache import cache
 from django.core.management import call_command
 from django.test import Client, override_settings
 from django.urls import reverse
-from rest_framework.test import APITestCase
+from rest_framework.test import APIClient, APITestCase
 
-from .models import EmailNotice, User
+from .models import EmailNotice, PasswordRecoveryChallenge, RecoveryProfile, User
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -52,6 +52,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "0701112233",
                 "password": "pass",
                 "password_confirm": "pass",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -60,6 +62,9 @@ class AuthenticationTests(APITestCase):
         self.assertEqual(response.data["phone"], "0701112233")
         self.assertEqual(response.data["first_name"], "Amina")
         self.assertEqual(response.data["surname"], "Nabirye")
+        self.assertTrue(response.data["recovery_configured"])
+        profile = RecoveryProfile.objects.get(user__phone="0701112233")
+        self.assertNotIn("green hills forever", profile.private_phrase_hash)
         self.assertIn("sessionid", self.client.cookies)
 
     def test_registration_rejects_mismatched_passwords(self):
@@ -72,6 +77,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "0701112233",
                 "password": "pass",
                 "password_confirm": "word",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -91,6 +98,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "+256 701 112 233",
                 "password": "pass",
                 "password_confirm": "pass",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -108,6 +117,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "0701112255",
                 "password": "1234",
                 "password_confirm": "1234",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -127,6 +138,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "0701112266",
                 "password": "pass",
                 "password_confirm": "pass",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -150,6 +163,8 @@ class AuthenticationTests(APITestCase):
                 "phone": "0701112277",
                 "password": "pass",
                 "password_confirm": "pass",
+                "recovery_private_phrase": "green hills forever",
+                "recovery_life_phrase": "auntie's sunshine name",
             },
             format="json",
         )
@@ -316,3 +331,101 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("admin-login"), {"phone": "admin", "password": "bkpassword"}, format="json")
         self.assertEqual(response.status_code, 200)
         self.assertIn("_auth_user_id", self.client.session)
+
+
+class PasswordRecoveryTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user(
+            phone="0705444001",
+            first_name="Amina",
+            last_name="Nabirye",
+            date_of_birth="1995-06-14",
+            password="old-pass",
+        )
+        from .recovery import normalize_recovery_phrase, recovery_hashes
+        private_hash, life_hash = recovery_hashes(
+            normalize_recovery_phrase("Lake breeze memory"),
+            normalize_recovery_phrase("Senga called me Sunshine"),
+        )
+        RecoveryProfile.objects.create(
+            user=self.user,
+            private_phrase_hash=private_hash,
+            life_phrase_hash=life_hash,
+        )
+
+    def start(self, phone="0705444001"):
+        return self.client.post(reverse("password-recovery-start"), {"phone": phone}, format="json")
+
+    def test_unknown_phone_gets_the_same_prompt_shape(self):
+        known = self.start()
+        unknown = self.start("0705999999")
+
+        self.assertEqual(known.status_code, 202)
+        self.assertEqual(unknown.status_code, 202)
+        self.assertEqual(known.data["prompts"], unknown.data["prompts"])
+        self.assertFalse(PasswordRecoveryChallenge.objects.get(public_id=known.data["recovery_id"]).is_decoy)
+        self.assertTrue(PasswordRecoveryChallenge.objects.get(public_id=unknown.data["recovery_id"]).is_decoy)
+
+    def test_customer_can_reset_password_and_answers_are_consumed(self):
+        active_session = APIClient()
+        active_session.force_login(self.user)
+        start = self.start()
+        response = self.client.post(
+            reverse("password-recovery-complete"),
+            {
+                "recovery_id": start.data["recovery_id"],
+                "private_phrase": "  LAKE   BREEZE memory ",
+                "life_phrase": "senga called me sunshine",
+                "new_password": "new-pass",
+                "password_confirm": "new-pass",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("new-pass"))
+        self.assertFalse(RecoveryProfile.objects.filter(user=self.user).exists())
+        self.assertIsNotNone(PasswordRecoveryChallenge.objects.get(public_id=start.data["recovery_id"]).consumed_at)
+        self.assertEqual(active_session.get(reverse("me")).status_code, 401)
+
+    def test_wrong_answers_are_generic_and_limited(self):
+        start = self.start()
+        payload = {
+            "recovery_id": start.data["recovery_id"],
+            "private_phrase": "wrong private phrase",
+            "life_phrase": "wrong social phrase",
+            "new_password": "new-pass",
+            "password_confirm": "new-pass",
+        }
+        for _ in range(5):
+            response = self.client.post(reverse("password-recovery-complete"), payload, format="json")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.data["detail"], "We could not verify those recovery details.")
+        challenge = PasswordRecoveryChallenge.objects.get(public_id=start.data["recovery_id"])
+        self.assertEqual(challenge.attempts, 5)
+        self.assertIsNotNone(challenge.consumed_at)
+
+    def test_existing_customer_can_configure_answers_with_current_password(self):
+        RecoveryProfile.objects.filter(user=self.user).delete()
+        self.client.force_login(self.user)
+        response = self.client.put(
+            reverse("recovery-profile"),
+            {
+                "current_password": "old-pass",
+                "recovery_private_phrase": "quiet road at sunset",
+                "recovery_life_phrase": "uncle called me champion",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["recovery_configured"])
+
+    def test_privileged_account_gets_decoy_challenge(self):
+        owner = User.objects.create_superuser(phone="0705444002", password="owner-pass")
+        private_hash = RecoveryProfile.objects.get(user=self.user).private_phrase_hash
+        life_hash = RecoveryProfile.objects.get(user=self.user).life_phrase_hash
+        RecoveryProfile.objects.create(user=owner, private_phrase_hash=private_hash, life_phrase_hash=life_hash)
+        response = self.start(owner.phone)
+        self.assertTrue(PasswordRecoveryChallenge.objects.get(public_id=response.data["recovery_id"]).is_decoy)
