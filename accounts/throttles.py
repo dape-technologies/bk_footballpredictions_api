@@ -16,6 +16,16 @@ class LoginRateThrottle(ClientIpRateThrottle):
     rate = "10/minute"
 
 
+class PasswordRecoveryStartRateThrottle(ClientIpRateThrottle):
+    scope = "password-recovery-start"
+    rate = "5/hour"
+
+
+class PasswordRecoveryCompleteRateThrottle(ClientIpRateThrottle):
+    scope = "password-recovery-complete"
+    rate = "20/hour"
+
+
 class PayoutRateThrottle(SimpleRateThrottle):
     scope = "payout-security"
     rate = "10/minute"

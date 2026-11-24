@@ -1,4 +1,5 @@
 import re
+import uuid
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
@@ -45,6 +46,33 @@ class User(AbstractUser):
 
     def __str__(self):
         return f"{self.full_name} · {self.phone}"
+
+
+class RecoveryProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="recovery_profile")
+    private_phrase_hash = models.CharField(max_length=128)
+    life_phrase_hash = models.CharField(max_length=128)
+    prompt_version = models.PositiveSmallIntegerField(default=1)
+    configured_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class PasswordRecoveryChallenge(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="password_recovery_challenges")
+    is_decoy = models.BooleanField(default=False)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    ip_address = models.GenericIPAddressField(blank=True, null=True)
+    device = models.CharField(max_length=300, blank=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["public_id", "expires_at"]),
+            models.Index(fields=["user", "created_at"]),
+        ]
 
 
 class ActivityLog(models.Model):
