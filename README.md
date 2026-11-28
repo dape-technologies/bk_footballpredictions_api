@@ -74,7 +74,7 @@ marked stale after fifteen minutes without a successful run. Configure these
 thresholds with `RECONCILIATION_EXPECTED_INTERVAL_MINUTES` and
 `RECONCILIATION_STALE_AFTER_MINUTES` when the production cron cadence differs.
 
-The command checks unresolved attempts, including `needs_review` and legacy `expired` records, when their next check is due. It uses the Relworx internal reference when available and falls back to the unique BK customer reference after an uncertain initiation response. Checkout stops waiting after `PAYMENT_PENDING_EXPIRY_MINUTES` (default 15), and a new attempt is allowed after a definitive failure or cancellation. Reconciliation continues in the background. Attempts still unresolved after 24 hours raise an alert. Staff with payment change permission can select an attempt in Django admin and choose **Recheck selected payments with Relworx**.
+The command checks unresolved attempts, including `needs_review` and legacy `expired` records, when their next check is due. It uses the Relworx internal reference when available and falls back to the unique BK customer reference after an uncertain initiation response. Checkout stops polling two minutes after the attempt starts. A new attempt is allowed after a definitive failure or cancellation. Reconciliation continues in the background. Attempts still unresolved after 24 hours raise an alert. Staff with payment change permission can select an attempt in Django admin and choose **Recheck selected payments with Relworx**.
 
 The operations cron installer can add the payment job. If cPanel already has a manually configured payment reconciliation job, keep a single schedule.
 
