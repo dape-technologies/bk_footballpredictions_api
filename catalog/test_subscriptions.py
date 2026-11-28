@@ -102,6 +102,36 @@ class WeeklySubscriptionTests(APITestCase):
         )
         self.assertEqual(self.client.post("/api/v1/me/subscriptions/", {}, format="json").status_code, 201)
 
+    def test_active_subscriber_can_purchase_a_one_off_package(self):
+        self.pay_order()
+
+        purchase_response = self.client.post(
+            "/api/v1/me/purchases/", {"package_id": self.one_off.pk}, format="json",
+        )
+        self.assertEqual(purchase_response.status_code, 201)
+
+        with patch("catalog.views.request_mobile_money_payment") as mocked_request:
+            mocked_request.return_value = {
+                "success": True, "message": "Pending", "internal_reference": "one-off-active-member",
+            }
+            payment_response = self.client.post(
+                f"/api/v1/me/purchases/{purchase_response.data['id']}/payment-attempts/",
+                {"phone": "0773454899"}, format="json",
+            )
+
+        self.assertEqual(payment_response.status_code, 202)
+        self.assertEqual(payment_response.data["checkout_type"], "package")
+
+    def test_weekly_content_cannot_be_purchased_as_a_one_off(self):
+        self.pay_order()
+
+        response = self.client.post(
+            "/api/v1/me/purchases/", {"package_id": self.weekly.pk}, format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Weekly content is included through the Weekly Plan.", str(response.data))
+
     def test_owner_upload_is_granted_to_active_subscriber_and_duplicate_success_is_idempotent(self):
         order, payment, confirmed_at = self.pay_order()
         self.client.force_login(self.owner)

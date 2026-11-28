@@ -334,7 +334,7 @@ class Payment(models.Model):
 
     @property
     def checkout_expires_at(self):
-        return self.created_at + timedelta(minutes=max(1, settings.PAYMENT_PENDING_EXPIRY_MINUTES))
+        return self.created_at + timedelta(minutes=settings.PAYMENT_PENDING_EXPIRY_MINUTES)
 
     @property
     def can_retry(self):

@@ -10,6 +10,7 @@ from django.contrib.auth.models import Group
 from django.core.management import call_command
 from django.test import override_settings
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -408,11 +409,11 @@ class PurchaseFlowTests(APITestCase):
         self.assertEqual(response.data["status"], Payment.Status.PENDING)
         self.assertEqual(payment.status, Payment.Status.PENDING)
 
-    @override_settings(PAYMENT_PENDING_EXPIRY_MINUTES=15)
     @patch("catalog.payment_services.check_mobile_money_payment")
     def test_checkout_timeout_does_not_release_a_provider_pending_payment(self, mocked_check):
         purchase, payment = self.start_payment()
-        Payment.objects.filter(pk=payment.pk).update(created_at=timezone.now() - timedelta(minutes=16))
+        created_at = timezone.now() - timedelta(minutes=2, seconds=1)
+        Payment.objects.filter(pk=payment.pk).update(created_at=created_at)
         mocked_check.return_value = {
             "success": True,
             "status": "pending",
@@ -424,6 +425,7 @@ class PurchaseFlowTests(APITestCase):
 
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(parse_datetime(response.data["checkout_expires_at"]), created_at + timedelta(minutes=2))
         self.assertEqual(payment.status, Payment.Status.PENDING)
         self.assertFalse(response.data["can_retry"])
         self.assertIn("check again later", response.data["customer_message"])
