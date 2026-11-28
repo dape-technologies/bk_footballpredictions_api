@@ -270,8 +270,8 @@ class Payment(models.Model):
         SYSTEM = "system", "System"
         VALIDATION = "validation", "Validation"
 
-    ACTIVE_STATUSES = (Status.CREATED, Status.SUBMITTED, Status.PENDING, Status.NEEDS_REVIEW)
-    TERMINAL_STATUSES = (Status.PAID, Status.FAILED, Status.EXPIRED, Status.CANCELLED)
+    ACTIVE_STATUSES = (Status.CREATED, Status.SUBMITTED, Status.PENDING, Status.NEEDS_REVIEW, Status.EXPIRED)
+    TERMINAL_STATUSES = (Status.PAID, Status.FAILED, Status.CANCELLED)
 
     purchase = models.ForeignKey(Purchase, on_delete=models.PROTECT, related_name="payments", blank=True, null=True)
     subscription_order = models.ForeignKey(
@@ -331,6 +331,14 @@ class Payment(models.Model):
                 name="payment_has_one_checkout_target",
             ),
         ]
+
+    @property
+    def checkout_expires_at(self):
+        return self.created_at + timedelta(minutes=max(1, settings.PAYMENT_PENDING_EXPIRY_MINUTES))
+
+    @property
+    def can_retry(self):
+        return self.status in (self.Status.FAILED, self.Status.CANCELLED)
 
     @property
     def product_name(self):

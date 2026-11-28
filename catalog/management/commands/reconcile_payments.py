@@ -7,7 +7,7 @@ from catalog.payment_services import reconcile_payment
 
 
 class Command(BaseCommand):
-    help = "Reconcile submitted and pending Relworx payments without relying on an open browser."
+    help = "Reconcile unresolved Relworx payments without relying on an open browser."
 
     def add_arguments(self, parser):
         parser.add_argument("--batch-size", type=int, default=100)
@@ -19,9 +19,9 @@ class Command(BaseCommand):
         now = timezone.now()
         try:
             payment_ids = list(
-                Payment.objects.filter(status__in=[Payment.Status.SUBMITTED, Payment.Status.PENDING])
+                Payment.objects.filter(status__in=Payment.ACTIVE_STATUSES)
                 .filter(Q(reconciliation_next_at__isnull=True) | Q(reconciliation_next_at__lte=now))
-                .order_by("created_at")
+                .order_by("reconciliation_next_at", "created_at")
                 .values_list("id", flat=True)[: max(1, options["batch_size"])]
             )
             outcomes = {"updated": 0, "error": 0, "mismatch": 0, "skipped": 0}

@@ -204,6 +204,8 @@ class PaymentSerializer(serializers.ModelSerializer):
     package = PublicPackageSerializer(read_only=True)
     receipt_url = serializers.SerializerMethodField()
     customer_message = serializers.SerializerMethodField()
+    checkout_expires_at = serializers.DateTimeField(read_only=True)
+    can_retry = serializers.BooleanField(read_only=True)
     product_name = serializers.ReadOnlyField()
     checkout_type = serializers.SerializerMethodField()
     duplicate_of_reference = serializers.CharField(source="duplicate_of.reference", read_only=True, default="")
@@ -219,6 +221,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             "failure_code", "failure_reason", "submitted_at", "confirmed_at",
             "failed_at", "last_checked_at", "check_attempts", "receipt_number",
             "receipt_issued_at", "receipt_url", "customer_message", "paid_at", "created_at", "updated_at",
+            "checkout_expires_at", "can_retry",
         ]
         read_only_fields = fields
 
@@ -235,10 +238,10 @@ class PaymentSerializer(serializers.ModelSerializer):
     def get_customer_message(self, obj):
         if obj.status == Payment.Status.PAID:
             return "Payment confirmed. Your access is ready."
-        if obj.status in (Payment.Status.CREATED, Payment.Status.SUBMITTED, Payment.Status.PENDING):
+        if obj.status in Payment.ACTIVE_STATUSES:
+            if obj.status in (Payment.Status.NEEDS_REVIEW, Payment.Status.EXPIRED) or obj.checkout_expires_at <= timezone.now():
+                return "We are still checking this payment. You can close checkout and check again later."
             return "Approve the mobile-money prompt on your phone. We will confirm it automatically."
-        if obj.status == Payment.Status.EXPIRED or obj.failure_code == "approval_window_expired":
-            return "The payment prompt expired before confirmation. Try again to receive a new prompt."
 
         detail = f"{obj.failure_code} {obj.failure_reason} {obj.provider_message}".lower()
         if "wrong pin" in detail or "incorrect pin" in detail:
@@ -249,8 +252,6 @@ class PaymentSerializer(serializers.ModelSerializer):
             return "The mobile-money provider declined this request because of insufficient balance, an account limit, or a transaction restriction."
         if "cancel" in detail or obj.status == Payment.Status.CANCELLED:
             return "The payment was cancelled. Try again when you are ready."
-        if obj.status == Payment.Status.NEEDS_REVIEW:
-            return "We could not confirm this payment automatically. Please contact BK support before trying again."
         if obj.failure_category in (Payment.FailureCategory.PROVIDER, Payment.FailureCategory.SYSTEM):
             return "The mobile-money provider could not complete this request. Please try again."
         if obj.status == Payment.Status.FAILED:
@@ -328,7 +329,9 @@ class PurchaseSerializer(serializers.ModelSerializer):
 
     def get_latest_payment(self, obj):
         payments = list(obj.payments.all())
-        payment = max(payments, key=lambda item: (item.created_at, item.id)) if payments else None
+        payment = max(payments, key=lambda item: (
+            item.status == Payment.Status.PAID, item.status in Payment.ACTIVE_STATUSES, item.created_at, item.id,
+        ), default=None)
         return PaymentSerializer(payment, context=self.context).data if payment else None
 
     def get_payment_timeline(self, obj):
@@ -394,7 +397,9 @@ class SubscriptionOrderSerializer(serializers.ModelSerializer):
 
     def get_latest_payment(self, obj):
         payments = list(obj.payments.all())
-        payment = max(payments, key=lambda item: (item.created_at, item.id)) if payments else None
+        payment = max(payments, key=lambda item: (
+            item.status == Payment.Status.PAID, item.status in Payment.ACTIVE_STATUSES, item.created_at, item.id,
+        ), default=None)
         return PaymentSerializer(payment, context=self.context).data if payment else None
 
 

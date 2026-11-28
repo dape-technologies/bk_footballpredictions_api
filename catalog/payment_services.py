@@ -9,7 +9,7 @@ from django.utils.dateparse import parse_datetime
 from accounts.models import User
 
 from .models import Payment, PaymentAlert, PaymentEvent, Purchase, SubscriptionOrder
-from .relworx import RelworxError, check_mobile_money_payment
+from .relworx import FAILED_REQUEST_STATUSES, RelworxError, check_mobile_money_payment
 from .wallet_services import accrue_payment
 
 
@@ -102,6 +102,37 @@ def _validate_identifiers(payment, payload):
 
 
 @transaction.atomic
+def record_initiation_result(payment_id, *, source, response=None, error=None):
+    payment = Payment.objects.select_for_update().get(pk=payment_id)
+    if payment.status != Payment.Status.SUBMITTED:
+        return payment
+    if error is None:
+        payment.internal_reference = str(response["internal_reference"])
+        payment.status = Payment.Status.PENDING
+        payment.provider_message = str(response.get("message", "Payment request sent."))[:240]
+        payment.reconciliation_next_at = timezone.now()
+        payment.save(update_fields=["internal_reference", "status", "provider_message", "reconciliation_next_at", "updated_at"])
+        record_payment_event(payment, "payment.pending", source=source, message=payment.provider_message, payload=response)
+        return payment
+
+    payment.provider_message = str(error)[:240]
+    payment.failure_category = Payment.FailureCategory.SYSTEM if error.uncertain else Payment.FailureCategory.PROVIDER
+    payment.failure_code = str(error.code or error.status_code or "initiation_error")[:80]
+    payment.failure_reason = str(error)
+    payment.reconciliation_next_at = timezone.now() if error.uncertain else None
+    if not error.uncertain:
+        payment.status = Payment.Status.FAILED
+        payment.failed_at = timezone.now()
+    payment.save(update_fields=[
+        "provider_message", "failure_category", "failure_code", "failure_reason",
+        "reconciliation_next_at", "status", "failed_at", "updated_at",
+    ])
+    event = "payment.initiation_uncertain" if error.uncertain else "payment.initiation_failed"
+    record_payment_event(payment, event, source=source, message=str(error))
+    return payment
+
+
+@transaction.atomic
 def apply_relworx_result(payment, payload, *, source):
     """Apply a provider result with locks around the payment and its entitlement."""
     payment = Payment.objects.select_for_update().select_related(
@@ -114,8 +145,13 @@ def apply_relworx_result(payment, payload, *, source):
         payment.subscription_order = SubscriptionOrder.objects.select_for_update().select_related("plan").get(
             pk=payment.subscription_order_id,
         )
-    provider_status = str(payload.get("status") or payload.get("request_status") or "").lower()
+    status_value = payload.get("status") if source == "webhook" else payload.get("request_status") or payload.get("status")
+    provider_status = str(status_value or "").strip().lower()
     internal_reference = _validate_identifiers(payment, payload)
+    if provider_status in FAILED_REQUEST_STATUSES and not (
+        str(payload.get("customer_reference") or "").strip() or (payment.internal_reference and internal_reference)
+    ):
+        raise PaymentVerificationError("customer reference")
     now = timezone.now()
     updates = []
 
@@ -219,7 +255,7 @@ def apply_relworx_result(payment, payload, *, source):
             record_confirmation(payment)
         return payment
 
-    if provider_status in {"failed", "failure", "declined", "cancelled", "canceled"}:
+    if provider_status in FAILED_REQUEST_STATUSES:
         if payment.status == Payment.Status.PAID:
             record_payment_event(payment, "provider.failure_after_success", source=source, payload=payload)
             return payment
@@ -232,6 +268,9 @@ def apply_relworx_result(payment, payload, *, source):
         payment.reconciliation_next_at = None
         updates.extend(["status", "failure_category", "failure_code", "failure_reason", "failed_at", "reconciliation_next_at"])
         payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
+        payment.alerts.filter(resolved_at__isnull=True, alert_key__in=[
+            f"payment-{payment.pk}-unresolved", f"payment-{payment.pk}-needs-review",
+        ]).update(resolved_at=now)
         record_payment_event(payment, "payment.failed", source=source, payload=payload)
         if category != Payment.FailureCategory.CUSTOMER:
             create_payment_alert(
@@ -243,26 +282,16 @@ def apply_relworx_result(payment, payload, *, source):
         return payment
 
     if provider_status in {"pending", "processing", "in_progress", "submitted"}:
-        if payment.status != Payment.Status.PAID:
-            expiry_minutes = max(1, settings.PAYMENT_PENDING_EXPIRY_MINUTES)
-            if payment.created_at <= now - timedelta(minutes=expiry_minutes):
-                payment.status = Payment.Status.EXPIRED
-                payment.failure_category = Payment.FailureCategory.CUSTOMER
-                payment.failure_code = "approval_window_expired"
-                payment.failure_reason = "The mobile-money approval window expired before payment was confirmed."
-                payment.failed_at = now
-                payment.reconciliation_next_at = None
-                updates.extend([
-                    "status", "failure_category", "failure_code", "failure_reason",
-                    "failed_at", "reconciliation_next_at",
-                ])
-            else:
-                payment.status = Payment.Status.PENDING
-                payment.reconciliation_next_at = now + timedelta(minutes=2)
-                updates.extend(["status", "reconciliation_next_at"])
+        if payment.status in Payment.ACTIVE_STATUSES:
+            payment.status = Payment.Status.PENDING
+            payment.reconciliation_next_at = now + timedelta(seconds=15)
+            payment.failure_category = ""
+            payment.failure_code = ""
+            payment.failure_reason = ""
+            payment.failed_at = None
+            updates.extend(["status", "reconciliation_next_at", "failure_category", "failure_code", "failure_reason", "failed_at"])
             payment.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
-            event_type = "payment.expired" if payment.status == Payment.Status.EXPIRED else "payment.pending"
-            record_payment_event(payment, event_type, source=source, message=payment.failure_reason, payload=payload)
+            record_payment_event(payment, "payment.pending", source=source, payload=payload)
         return payment
 
     raise PaymentVerificationError("status", "Unsupported payment status.")
@@ -290,13 +319,20 @@ def record_verification_mismatch(payment, error, *, source, payload=None):
 def reconcile_payment(payment_id, *, max_attempts=12, max_age_hours=24, source="scheduled_reconciliation"):
     with transaction.atomic():
         payment = Payment.objects.select_for_update().select_related("purchase__package", "subscription_order__plan").get(pk=payment_id)
-        if payment.status not in (Payment.Status.SUBMITTED, Payment.Status.PENDING):
+        if payment.status not in Payment.ACTIVE_STATUSES:
             return payment, "skipped"
         now = timezone.now()
-        if source == "scheduled_reconciliation" and payment.reconciliation_next_at and payment.reconciliation_next_at > now:
+        if payment.reconciliation_next_at and payment.reconciliation_next_at > now:
             return payment, "skipped"
-        # A short lease prevents overlapping cron runs from querying the same payment.
-        payment.reconciliation_next_at = now + timedelta(minutes=5)
+        too_old = payment.created_at <= now - timedelta(hours=max_age_hours)
+        if too_old:
+            create_payment_alert(
+                payment, "unresolved", "Payment still unresolved",
+                f"{payment.reference} has no verified final result after {max_age_hours} hours. Recheck it with Relworx.",
+                severity=PaymentAlert.Severity.CRITICAL,
+            )
+        # All callers share this lease, including customer and staff refreshes.
+        payment.reconciliation_next_at = now + timedelta(seconds=max(30, settings.RELWORX_REQUEST_TIMEOUT_SECONDS + 5))
         payment.save(update_fields=["reconciliation_next_at", "updated_at"])
 
     try:
@@ -304,20 +340,19 @@ def reconcile_payment(payment_id, *, max_attempts=12, max_age_hours=24, source="
     except RelworxError as error:
         with transaction.atomic():
             payment = Payment.objects.select_for_update().get(pk=payment_id)
+            if payment.status not in Payment.ACTIVE_STATUSES:
+                return payment, "skipped"
             payment.last_checked_at = timezone.now()
             payment.check_attempts += 1
             payment.provider_message = str(error)[:240]
             payment.failure_category = Payment.FailureCategory.SYSTEM if error.uncertain else Payment.FailureCategory.PROVIDER
             payment.failure_code = str(error.code or error.status_code or "provider_error")[:80]
             payment.failure_reason = str(error)
-            too_old = payment.created_at <= timezone.now() - timedelta(hours=max_age_hours)
             exhausted = payment.check_attempts >= max_attempts
             if too_old or exhausted:
                 payment.status = Payment.Status.NEEDS_REVIEW
-                payment.reconciliation_next_at = None
-            else:
-                delay_minutes = min(30, 2 ** min(payment.check_attempts, 4))
-                payment.reconciliation_next_at = timezone.now() + timedelta(minutes=delay_minutes)
+            delay_seconds = min(300, 15 * 2 ** min(payment.check_attempts, 5))
+            payment.reconciliation_next_at = timezone.now() + timedelta(seconds=delay_seconds)
             payment.save(update_fields=[
                 "last_checked_at", "check_attempts", "provider_message", "failure_category",
                 "failure_code", "failure_reason", "status", "reconciliation_next_at", "updated_at",

@@ -39,6 +39,7 @@ from .payment_services import (
     apply_relworx_result,
     create_payment_alert,
     reconcile_payment,
+    record_initiation_result,
     record_payment_event,
     record_verification_mismatch,
 )
@@ -468,26 +469,12 @@ class SubscriptionPaymentAttemptView(APIView):
         try:
             provider_response = request_mobile_money_payment(payment)
         except RelworxError as error:
-            payment.provider_message = str(error)[:240]
-            payment.failure_category = Payment.FailureCategory.SYSTEM if error.uncertain else Payment.FailureCategory.PROVIDER
-            payment.failure_code = str(error.code or error.status_code or "initiation_error")[:80]
-            payment.failure_reason = str(error)
-            fields = ["provider_message", "failure_category", "failure_code", "failure_reason", "updated_at"]
-            if not error.uncertain:
-                payment.status = Payment.Status.FAILED
-                payment.failed_at = timezone.now()
-                payment.reconciliation_next_at = None
-                fields += ["status", "failed_at", "reconciliation_next_at"]
-            payment.save(update_fields=fields)
-            record_payment_event(payment, "payment.initiation_uncertain" if error.uncertain else "payment.initiation_failed", source="subscription_checkout", message=str(error))
-            if error.uncertain:
-                return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
-            return Response({"detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
-        payment.internal_reference = str(provider_response["internal_reference"])
-        payment.status = Payment.Status.PENDING
-        payment.provider_message = str(provider_response.get("message", "Payment request sent."))[:240]
-        payment.save(update_fields=["internal_reference", "status", "provider_message", "updated_at"])
-        record_payment_event(payment, "payment.pending", source="subscription_checkout", message=payment.provider_message, payload=provider_response)
+            payment = record_initiation_result(payment.pk, source="subscription_checkout", error=error)
+            if payment.can_retry:
+                data = PaymentSerializer(payment, context={"request": request}).data
+                return Response({"detail": str(error), "payment": data}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
+        payment = record_initiation_result(payment.pk, source="subscription_checkout", response=provider_response)
         return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
 
 
@@ -537,24 +524,8 @@ class PaymentAttemptView(APIView):
         try:
             provider_response = request_mobile_money_payment(payment)
         except RelworxError as error:
-            payment.provider_message = str(error)[:240]
-            payment.failure_category = Payment.FailureCategory.SYSTEM if error.uncertain else Payment.FailureCategory.PROVIDER
-            payment.failure_code = str(error.code or error.status_code or "initiation_error")[:80]
-            payment.failure_reason = str(error)
-            update_fields = ["provider_message", "failure_category", "failure_code", "failure_reason", "updated_at"]
-            if not error.uncertain:
-                payment.status = Payment.Status.FAILED
-                payment.failed_at = timezone.now()
-                payment.reconciliation_next_at = None
-                update_fields.extend(["status", "failed_at", "reconciliation_next_at"])
-            payment.save(update_fields=update_fields)
-            record_payment_event(
-                payment,
-                "payment.initiation_uncertain" if error.uncertain else "payment.initiation_failed",
-                source="checkout",
-                message=str(error),
-            )
-            if not error.uncertain:
+            payment = record_initiation_result(payment.pk, source="checkout", error=error)
+            if payment.can_retry:
                 create_payment_alert(
                     payment,
                     "initiation-failure",
@@ -568,15 +539,12 @@ class PaymentAttemptView(APIView):
                 description=f"Relworx payment initiation was {'uncertain' if error.uncertain else 'rejected'} for {payment.reference}.",
                 target=payment,
             )
-            if error.uncertain:
-                return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
-            return Response({"detail": str(error)}, status=status.HTTP_502_BAD_GATEWAY)
+            if payment.can_retry:
+                data = PaymentSerializer(payment, context={"request": request}).data
+                return Response({"detail": str(error), "payment": data}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(PaymentSerializer(payment, context={"request": request}).data, status=status.HTTP_202_ACCEPTED)
 
-        payment.internal_reference = str(provider_response["internal_reference"])
-        payment.status = Payment.Status.PENDING
-        payment.provider_message = str(provider_response.get("message", "Payment request sent."))[:240]
-        payment.save(update_fields=["internal_reference", "status", "provider_message", "updated_at"])
-        record_payment_event(payment, "payment.pending", source="checkout", message=payment.provider_message, payload=provider_response)
+        payment = record_initiation_result(payment.pk, source="checkout", response=provider_response)
         from .analytics_services import record_journey
         record_journey(request, "prompt_sent", payment.package, payment.purchase, event_id=f"prompt-{payment.pk}")
         record_activity(
@@ -632,7 +600,7 @@ class PaymentRefreshView(APIView):
         payment = Payment.objects.select_related("purchase__package", "subscription_order__plan", "package", "user").filter(pk=pk, user=request.user).first()
         if not payment:
             return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
-        if payment.status not in (Payment.Status.SUBMITTED, Payment.Status.PENDING):
+        if payment.status not in Payment.ACTIVE_STATUSES:
             return Response(PaymentSerializer(payment, context={"request": request}).data)
         reconciled, outcome = reconcile_payment(payment.pk, source="customer_refresh")
         reconciled = Payment.objects.select_related("purchase__package", "subscription_order__plan", "package", "user").get(pk=reconciled.pk)

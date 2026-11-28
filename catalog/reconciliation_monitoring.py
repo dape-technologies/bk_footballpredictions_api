@@ -47,7 +47,7 @@ def reconciliation_health_payload(*, include_history=False):
         jobs[job] = item
 
     jobs[ReconciliationRun.Job.PAYMENTS].update({
-        "due_count": Payment.objects.filter(status__in=[Payment.Status.SUBMITTED, Payment.Status.PENDING]).filter(
+        "due_count": Payment.objects.filter(status__in=Payment.ACTIVE_STATUSES).filter(
             Q(reconciliation_next_at__isnull=True) | Q(reconciliation_next_at__lte=now)
         ).count(),
         "needs_review_count": Payment.objects.filter(status=Payment.Status.NEEDS_REVIEW).count(),

@@ -5,6 +5,8 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+FAILED_REQUEST_STATUSES = {"failed", "failure", "declined", "cancelled", "canceled"}
+
 
 class RelworxError(Exception):
     def __init__(self, message, *, uncertain=False, status_code=None, code="", payload=None):
@@ -38,6 +40,7 @@ def _authenticated_request(url, *, data=None, method="GET"):
             detail = None
         raise RelworxError(
             detail or "The payment provider rejected this request.",
+            uncertain=method == "POST" and (error.code >= 500 or error.code == 408),
             status_code=error.code,
             code=str(error_payload.get("code", "")) if isinstance(error_payload, dict) else "",
             payload=error_payload if isinstance(error_payload, dict) else {},
@@ -64,7 +67,9 @@ def request_mobile_money_payment(payment):
     }
     result = _authenticated_request(url, data=payload, method="POST")
 
-    if not result.get("success") or not result.get("internal_reference"):
+    if not isinstance(result, dict) or (result.get("success") is not False and not result.get("internal_reference")):
+        raise RelworxError("Relworx did not return a payment reference.", uncertain=True)
+    if not result.get("success"):
         raise RelworxError(result.get("message") or "The payment request could not be started.")
     return result
 
@@ -80,8 +85,11 @@ def check_mobile_money_payment(payment):
     })
     url = f"{settings.RELWORX_API_BASE_URL.rstrip('/')}/api/mobile-money/check-request-status?{query}"
     result = _authenticated_request(url)
-    if not result.get("success"):
-        raise RelworxError(result.get("message") or "The payment status could not be checked.")
+    if not isinstance(result, dict):
+        raise RelworxError("Relworx returned an invalid payment status.", uncertain=True)
+    request_status = str(result.get("request_status") or result.get("status") or "").strip().lower()
+    if not result.get("success") and request_status not in FAILED_REQUEST_STATUSES:
+        raise RelworxError(result.get("message") or "The payment status could not be checked.", payload=result)
     return result
 
 

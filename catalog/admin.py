@@ -1,5 +1,6 @@
 from django.contrib import admin
 
+from .payment_services import reconcile_payment
 from .models import (
     FreePick, Package, Payment, PaymentAlert, PaymentEvent, PayoutRequest, Prediction, ReconciliationRun,
     Purchase, RecentWin, SubscriptionContentGrant, SubscriptionOrder, SubscriptionPlan,
@@ -44,6 +45,7 @@ class RecentWinAdmin(admin.ModelAdmin):
 
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
+    actions = ["recheck_with_relworx"]
     list_display = ["reference", "user", "product_name", "amount", "currency", "status", "settlement_classification", "failure_category", "confirmed_at", "created_at"]
     list_filter = ["status", "settlement_classification", "failure_category", "provider", "currency", "created_at"]
     search_fields = ["reference", "internal_reference", "provider_transaction_id", "receipt_number", "user__phone", "package__name"]
@@ -55,6 +57,14 @@ class PaymentAdmin(admin.ModelAdmin):
         "last_checked_at", "check_attempts", "reconciliation_next_at", "receipt_number",
         "receipt_issued_at", "paid_at", "created_at", "updated_at",
     ]
+
+    @admin.action(permissions=["change"], description="Recheck selected payments with Relworx")
+    def recheck_with_relworx(self, request, queryset):
+        outcomes = {}
+        for payment_id in queryset.values_list("id", flat=True):
+            _, outcome = reconcile_payment(payment_id, source="staff_recheck")
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        self.message_user(request, ", ".join(f"{key}: {value}" for key, value in outcomes.items()))
 
 
 @admin.register(PaymentEvent)
