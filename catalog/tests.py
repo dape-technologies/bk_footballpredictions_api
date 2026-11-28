@@ -410,7 +410,7 @@ class PurchaseFlowTests(APITestCase):
 
     @override_settings(PAYMENT_PENDING_EXPIRY_MINUTES=15)
     @patch("catalog.payment_services.check_mobile_money_payment")
-    def test_status_refresh_expires_stale_provider_pending_payment(self, mocked_check):
+    def test_checkout_timeout_does_not_release_a_provider_pending_payment(self, mocked_check):
         purchase, payment = self.start_payment()
         Payment.objects.filter(pk=payment.pk).update(created_at=timezone.now() - timedelta(minutes=16))
         mocked_check.return_value = {
@@ -424,9 +424,33 @@ class PurchaseFlowTests(APITestCase):
 
         payment.refresh_from_db()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payment.status, Payment.Status.EXPIRED)
-        self.assertEqual(payment.failure_code, "approval_window_expired")
-        self.assertIn("new prompt", response.data["customer_message"])
+        self.assertEqual(payment.status, Payment.Status.PENDING)
+        self.assertFalse(response.data["can_retry"])
+        self.assertIn("check again later", response.data["customer_message"])
+
+        with patch("catalog.views.request_mobile_money_payment") as mocked_request:
+            retry = self.client.post(
+                f"/api/v1/me/purchases/{purchase.id}/payment-attempts/",
+                {"phone": "0773454899"}, format="json",
+            )
+        self.assertEqual(retry.status_code, 409)
+        mocked_request.assert_not_called()
+
+    @patch("catalog.payment_services.check_mobile_money_payment")
+    def test_review_and_legacy_expired_payments_release_retry_after_verified_decline(self, mocked_check):
+        purchase, payment = self.start_payment()
+        url = f"/api/v1/me/payments/{payment.id}/refresh/"
+        for state in (Payment.Status.EXPIRED, Payment.Status.NEEDS_REVIEW):
+            with self.subTest(state=state):
+                Payment.objects.filter(pk=payment.pk).update(status=state, reconciliation_next_at=None)
+                mocked_check.return_value = {
+                    "success": True, "status": "failed",
+                    "customer_reference": payment.reference, "internal_reference": payment.internal_reference,
+                }
+                result = self.client.post(url, {}, format="json")
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.data["status"], Payment.Status.FAILED)
+                self.assertTrue(result.data["can_retry"])
 
         with patch("catalog.views.request_mobile_money_payment") as mocked_request:
             mocked_request.return_value = {
@@ -441,6 +465,22 @@ class PurchaseFlowTests(APITestCase):
             )
         self.assertEqual(retry.status_code, 202)
         self.assertNotEqual(retry.data["id"], payment.id)
+        self.assertNotEqual(retry.data["reference"], payment.reference)
+
+    @patch("catalog.payment_services.check_mobile_money_payment")
+    def test_status_error_keeps_payment_recheckable_and_throttles_refresh(self, mocked_check):
+        from .relworx import RelworxError
+
+        _, payment = self.start_payment()
+        Payment.objects.filter(pk=payment.pk).update(created_at=timezone.now() - timedelta(hours=25))
+        mocked_check.side_effect = RelworxError("Provider unreachable.", uncertain=True)
+        url = f"/api/v1/me/payments/{payment.id}/refresh/"
+        for _ in range(2):
+            response = self.client.post(url, {}, format="json")
+            self.assertEqual(response.data["status"], Payment.Status.NEEDS_REVIEW)
+            self.assertFalse(response.data["can_retry"])
+        mocked_check.assert_called_once()
+        self.assertTrue(payment.alerts.filter(alert_key=f"payment-{payment.pk}-unresolved").exists())
 
     def test_customer_message_explains_wrong_pin_without_hiding_owner_detail(self):
         _, payment = self.start_payment()
@@ -648,8 +688,9 @@ class PurchaseFlowTests(APITestCase):
     @patch("catalog.payment_services.check_mobile_money_payment")
     def test_scheduled_reconciliation_recovers_payment_without_open_browser(self, mocked_check):
         purchase, payment = self.start_payment()
+        payment.status = Payment.Status.NEEDS_REVIEW
         payment.reconciliation_next_at = timezone.now() - timedelta(seconds=1)
-        payment.save(update_fields=["reconciliation_next_at", "updated_at"])
+        payment.save(update_fields=["status", "reconciliation_next_at", "updated_at"])
         mocked_check.return_value = {
             "success": True,
             "status": "success",
